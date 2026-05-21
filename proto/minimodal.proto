@@ -1,0 +1,165 @@
+syntax = "proto3";
+
+package minimodal;
+
+option go_package = "minimodal/orchestrator/pb;pb";
+
+// =============================================================================
+// Service: Orchestrator
+//
+// The Orchestrator is the central scheduler. Python SDK clients call
+// InvokeFunction / GetJobStatus to submit work and poll for results. Workers
+// call RegisterWorker on startup and Heartbeat continuously to signal liveness.
+// =============================================================================
+service Orchestrator {
+  // Submit a serialized function + args for execution.
+  // Returns a job_id immediately; client polls GetJobStatus for completion.
+  rpc InvokeFunction(InvokeFunctionRequest) returns (InvokeFunctionResponse);
+
+  // Poll for the status (and on completion, the result) of a previously
+  // submitted job.
+  rpc GetJobStatus(GetJobStatusRequest) returns (JobStatusResponse);
+
+  // Worker registers itself on startup so the scheduler can route tasks to it.
+  rpc RegisterWorker(RegisterWorkerRequest) returns (RegisterWorkerResponse);
+
+  // Worker sends periodic heartbeats. Missed heartbeats trigger fault
+  // detection and reassignment of any in-flight jobs on that worker.
+  rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
+
+  // Worker reports the terminal result of a task back to the orchestrator.
+  // Called from worker after ExecuteTask finishes (success or failure).
+  rpc ReportTaskResult(ReportTaskResultRequest) returns (ReportTaskResultResponse);
+}
+
+// =============================================================================
+// Service: Worker
+//
+// The Orchestrator opens a gRPC connection to each registered Worker and calls
+// ExecuteTask to dispatch work. This is a push model from orchestrator to
+// worker (workers do not poll).
+// =============================================================================
+service Worker {
+  rpc ExecuteTask(ExecuteTaskRequest) returns (ExecuteTaskResponse);
+}
+
+// =============================================================================
+// Job lifecycle
+// =============================================================================
+enum JobStatus {
+  JOB_STATUS_UNKNOWN = 0;
+  JOB_STATUS_PENDING = 1;   // Accepted, queued, not yet assigned to a worker.
+  JOB_STATUS_RUNNING = 2;   // Assigned to a worker, executing.
+  JOB_STATUS_DONE    = 3;   // Completed successfully; result_bytes populated.
+  JOB_STATUS_FAILED  = 4;   // Permanent failure after retries; error populated.
+}
+
+enum ColdStartStrategy {
+  COLD_START_UNSPECIFIED = 0;
+  COLD_START_NAIVE       = 1;  // fresh interpreter per invocation
+  COLD_START_FORK        = 2;  // fork from pre-warmed parent
+  COLD_START_CRIU        = 3;  // restore from CRIU snapshot (stubbed in v1)
+}
+
+// =============================================================================
+// Orchestrator messages
+// =============================================================================
+message InvokeFunctionRequest {
+  // cloudpickle-serialized callable.
+  bytes function_bytes = 1;
+  // cloudpickle-serialized (args, kwargs) tuple.
+  bytes args_bytes = 2;
+  // Optional human-readable name (qualname) for logging / dashboard.
+  string function_name = 3;
+  // Optional override for benchmarking different cold-start strategies.
+  ColdStartStrategy cold_start_strategy = 4;
+  // Optional caller-supplied idempotency key. If set, the orchestrator looks
+  // up an existing job with the same key; if found, returns its job_id
+  // instead of creating a new one. Two concurrent submits with the same
+  // key are serialized via a BoltDB transaction — first-writer wins.
+  // Upgrades the system's at-least-once guarantee toward exactly-once for
+  // callers that supply keys.
+  string idempotency_key = 5;
+}
+
+message InvokeFunctionResponse {
+  string job_id = 1;
+}
+
+message GetJobStatusRequest {
+  string job_id = 1;
+}
+
+message JobStatusResponse {
+  string job_id = 1;
+  JobStatus status = 2;
+  // Populated when status == DONE.
+  bytes result_bytes = 3;
+  // Populated when status == FAILED (or in transient form for retries).
+  string error = 4;
+  // For client-side metrics: ms from InvokeFunction RPC to first execution start.
+  int64 cold_start_ms = 5;
+  // Total wall time from invocation to completion (DONE/FAILED only).
+  int64 total_duration_ms = 6;
+  int32 retry_count = 7;
+  string worker_id = 8;
+}
+
+message RegisterWorkerRequest {
+  // Worker self-assigns a UUID; orchestrator uses this as the canonical key.
+  string worker_id = 1;
+  // host:port the orchestrator can dial back on for ExecuteTask.
+  string address = 2;
+  // Optional declared capacity (number of concurrent slots).
+  int32 capacity = 3;
+}
+
+message RegisterWorkerResponse {
+  // Echo the assigned worker_id (in case orchestrator overrides).
+  string worker_id = 1;
+  // Recommended heartbeat interval in milliseconds.
+  int32 heartbeat_interval_ms = 2;
+}
+
+message HeartbeatRequest {
+  string worker_id = 1;
+  // Worker's current load (number of in-flight tasks). Used by scheduler.
+  int32 active_tasks = 2;
+}
+
+message HeartbeatResponse {
+  // Orchestrator may ask the worker to gracefully drain (e.g. for shutdown).
+  bool should_drain = 1;
+}
+
+message ReportTaskResultRequest {
+  string job_id = 1;
+  string worker_id = 2;
+  bool success = 3;
+  bytes result_bytes = 4;
+  string error = 5;
+  int64 cold_start_ms = 6;
+  int64 execution_ms = 7;
+}
+
+message ReportTaskResultResponse {
+  bool acknowledged = 1;
+}
+
+// =============================================================================
+// Worker messages
+// =============================================================================
+message ExecuteTaskRequest {
+  string job_id = 1;
+  bytes function_bytes = 2;
+  bytes args_bytes = 3;
+  string function_name = 4;
+  ColdStartStrategy cold_start_strategy = 5;
+}
+
+message ExecuteTaskResponse {
+  // Synchronous ack only — the actual result is sent back via
+  // Orchestrator.ReportTaskResult after execution completes.
+  bool accepted = 1;
+  string rejection_reason = 2;
+}

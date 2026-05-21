@@ -1,0 +1,34 @@
+# docker-compose for local dev: 1 orchestrator + 4 workers on a private network.
+# Dockerfiles live alongside the binaries they build (orchestrator/Dockerfile,
+# worker/Dockerfile) — both are placeholders in Phase 1.
+version: "3.9"
+
+services:
+  orchestrator:
+    build:
+      context: .
+      dockerfile: orchestrator/Dockerfile
+    environment:
+      - MINIMODAL_PORT=50051
+      - MINIMODAL_DB_PATH=/data/minimodal.db
+    ports:
+      - "50051:50051"
+      - "8080:8080"   # /metrics endpoint (added in Phase 5)
+    volumes:
+      - orchestrator-data:/data
+
+  worker:
+    build:
+      context: .
+      dockerfile: worker/Dockerfile
+    depends_on:
+      - orchestrator
+    environment:
+      - ORCH_ADDR=orchestrator:50051
+      - WORKER_PORT=50100
+      - MINIMODAL_COLD_START=fork
+    deploy:
+      replicas: 4
+
+volumes:
+  orchestrator-data:

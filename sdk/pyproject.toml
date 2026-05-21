@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "minimodal"
+version = "0.1.0"
+description = "Client SDK for the minimodal distributed function runtime."
+requires-python = ">=3.10"
+dependencies = [
+    "grpcio>=1.60",
+    "protobuf>=4.25",
+    "cloudpickle>=3.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["minimodal*"]

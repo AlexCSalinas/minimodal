@@ -1,0 +1,37 @@
+# Go
+orchestrator/orchestrator
+orchestrator/*.test
+*.exe
+*.out
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.venv/
+venv/
+.eggs/
+dist/
+build/
+
+# Generated proto stubs (regen via `make proto`)
+orchestrator/pb/*.pb.go
+sdk/minimodal/pb/*_pb2.py
+sdk/minimodal/pb/*_pb2_grpc.py
+sdk/minimodal/pb/*_pb2.pyi
+worker/pb/*_pb2.py
+worker/pb/*_pb2_grpc.py
+worker/pb/*_pb2.pyi
+
+# BoltDB
+*.db
+
+# Benchmark output
+benchmarks/results/
+
+# Editor
+.vscode/
+.idea/
+*.swp
+.DS_Store

@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>minimodal · dashboard</title>
+  <style>
+    :root {
+      --bg: #0b1020;
+      --panel: #141a2e;
+      --panel-2: #1a2140;
+      --border: #1f2742;
+      --text: #e6e9f2;
+      --muted: #8a92ad;
+      --accent: #7aa2f7;
+      --good: #2dd4bf;
+      --warn: #facc15;
+      --bad: #f87171;
+    }
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", system-ui, sans-serif;
+      margin: 0; padding: 32px; background: var(--bg); color: var(--text);
+      font-feature-settings: "tnum" on;
+    }
+    h1 {
+      margin: 0 0 4px 0; font-weight: 600; letter-spacing: -0.5px; font-size: 24px;
+    }
+    .sub { color: var(--muted); font-size: 13px; margin-bottom: 28px; }
+    .sub .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; background: var(--bad); }
+    .sub.online .dot { background: var(--good); }
+    .grid {
+      display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; margin-bottom: 18px;
+    }
+    .card {
+      background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 16px;
+    }
+    .label { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.6px; }
+    .value { font-size: 28px; margin-top: 6px; }
+    .value .unit { font-size: 14px; color: var(--muted); margin-left: 4px; }
+    .row { display: grid; grid-template-columns: 2fr 1fr; gap: 14px; margin-bottom: 18px; }
+    @media (max-width: 900px) {
+      .row { grid-template-columns: 1fr; }
+      .grid { grid-template-columns: repeat(2, 1fr); }
+    }
+    .panel {
+      background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 16px;
+    }
+    .panel h2 {
+      margin: 0 0 12px 0; font-size: 13px; font-weight: 600; color: var(--muted);
+      text-transform: uppercase; letter-spacing: 0.6px;
+    }
+    .worker-grid {
+      display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 8px;
+    }
+    .worker {
+      background: var(--panel-2); border: 1px solid var(--border); border-radius: 8px;
+      padding: 10px 12px; position: relative; overflow: hidden;
+    }
+    .worker.dead {
+      opacity: 0.5;
+    }
+    .worker .util-bar {
+      position: absolute; left: 0; bottom: 0; height: 3px;
+      background: linear-gradient(to right, var(--good), var(--warn), var(--bad));
+      transition: width 0.5s ease-out;
+    }
+    .worker .id { font-size: 13px; font-weight: 600; }
+    .worker .addr { font-size: 10px; color: var(--muted); margin-top: 1px; }
+    .worker .stats { font-size: 11px; color: var(--muted); margin-top: 8px; display: flex; justify-content: space-between; }
+    .worker .badge {
+      display: inline-block; font-size: 9px; padding: 1px 6px; border-radius: 4px;
+      background: var(--good); color: #042c25; font-weight: 600; letter-spacing: 0.3px;
+    }
+    .worker.dead .badge { background: var(--bad); color: #2c0606; }
+    .worker .badge.draining { background: var(--warn); color: #3a2c00; }
+    canvas { max-width: 100%; }
+    .empty { color: var(--muted); font-size: 13px; padding: 24px 8px; text-align: center; }
+  </style>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+</head>
+<body>
+  <h1>minimodal</h1>
+  <div id="status" class="sub"><span class="dot"></span><span id="status-text">connecting...</span></div>
+
+  <div class="grid">
+    <div class="card"><div class="label">Active workers</div><div class="value"><span id="m-workers">—</span><span class="unit" id="m-workers-total"></span></div></div>
+    <div class="card"><div class="label">Queued jobs</div><div class="value" id="m-queued">—</div></div>
+    <div class="card"><div class="label">In flight</div><div class="value" id="m-inflight">—</div></div>
+    <div class="card"><div class="label">Total invocations</div><div class="value" id="m-total">—</div></div>
+    <div class="card"><div class="label">p50 cold start</div><div class="value"><span id="m-p50">—</span><span class="unit">ms</span></div></div>
+    <div class="card"><div class="label">p95 cold start</div><div class="value"><span id="m-p95">—</span><span class="unit">ms</span></div></div>
+    <div class="card"><div class="label">p99 cold start</div><div class="value"><span id="m-p99">—</span><span class="unit">ms</span></div></div>
+    <div class="card"><div class="label">Error rate</div><div class="value"><span id="m-err">—</span><span class="unit">%</span></div></div>
+  </div>
+
+  <div class="row">
+    <div class="panel">
+      <h2>Cold start (last 60s)</h2>
+      <canvas id="latency-chart" height="220"></canvas>
+    </div>
+    <div class="panel">
+      <h2>Workers</h2>
+      <div id="worker-grid" class="worker-grid">
+        <div class="empty">no workers registered</div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const fmt = (n) => n == null ? "—" : new Intl.NumberFormat().format(n);
+    const ctx = document.getElementById('latency-chart').getContext('2d');
+    const chart = new Chart(ctx, {
+      type: 'line',
+      data: {
+        labels: [],
+        datasets: [
+          { label: 'p50', data: [], borderColor: '#7aa2f7', backgroundColor: 'rgba(122,162,247,0.1)', tension: 0.25, fill: true },
+          { label: 'p95', data: [], borderColor: '#facc15', tension: 0.25 },
+          { label: 'p99', data: [], borderColor: '#f87171', tension: 0.25 },
+        ],
+      },
+      options: {
+        animation: false, responsive: true, plugins: { legend: { labels: { color: '#8a92ad' } } },
+        scales: {
+          x: { ticks: { color: '#8a92ad', maxTicksLimit: 6 }, grid: { color: 'rgba(255,255,255,0.04)' } },
+          y: { beginAtZero: true, ticks: { color: '#8a92ad' }, grid: { color: 'rgba(255,255,255,0.04)' } },
+        },
+      },
+    });
+
+    function setOnline(ok) {
+      const el = document.getElementById('status');
+      el.classList.toggle('online', ok);
+      document.getElementById('status-text').textContent = ok
+        ? `connected · uptime ${formatUptime(window._uptime || 0)}`
+        : 'orchestrator unreachable';
+    }
+    function formatUptime(s) {
+      const h = Math.floor(s/3600), m = Math.floor((s%3600)/60), sec = s%60;
+      return [h, m, sec].map(n => String(n).padStart(2, '0')).join(':');
+    }
+
+    function renderWorkers(workers) {
+      const grid = document.getElementById('worker-grid');
+      if (!workers || workers.length === 0) {
+        grid.innerHTML = '<div class="empty">no workers registered</div>';
+        return;
+      }
+      workers.sort((a, b) => a.id.localeCompare(b.id));
+      grid.innerHTML = workers.map(w => {
+        const util = Math.round((w.utilization || 0) * 100);
+        const dead = !w.alive;
+        return `
+          <div class="worker ${dead ? 'dead' : ''}">
+            <div class="id">${escapeHTML(w.id)}</div>
+            <div class="addr">${escapeHTML(w.address)}</div>
+            <div class="stats">
+              <span><span class="badge">${dead ? 'DEAD' : 'ALIVE'}</span></span>
+              <span>${w.active_tasks}/${w.capacity} · ${util}%</span>
+            </div>
+            <div class="util-bar" style="width: ${Math.min(100, util)}%"></div>
+          </div>
+        `;
+      }).join('');
+    }
+    function escapeHTML(s) {
+      return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+    }
+
+    async function poll() {
+      try {
+        const r = await fetch('/metrics', { cache: 'no-cache' });
+        if (!r.ok) throw new Error(`${r.status}`);
+        const m = await r.json();
+        window._uptime = m.uptime_s;
+        setOnline(true);
+
+        document.getElementById('m-workers').textContent = m.active_workers;
+        document.getElementById('m-workers-total').textContent = m.total_workers ? ` / ${m.total_workers}` : '';
+        document.getElementById('m-queued').textContent = fmt(m.queued_jobs);
+        document.getElementById('m-inflight').textContent = fmt(m.in_flight_jobs);
+        document.getElementById('m-total').textContent = fmt(m.total_invocations);
+        document.getElementById('m-p50').textContent = fmt(m.p50_cold_start_ms);
+        document.getElementById('m-p95').textContent = fmt(m.p95_cold_start_ms);
+        document.getElementById('m-p99').textContent = fmt(m.p99_cold_start_ms);
+        document.getElementById('m-err').textContent = ((m.error_rate || 0) * 100).toFixed(1);
+
+        const t = new Date().toLocaleTimeString();
+        chart.data.labels.push(t);
+        chart.data.datasets[0].data.push(m.p50_cold_start_ms);
+        chart.data.datasets[1].data.push(m.p95_cold_start_ms);
+        chart.data.datasets[2].data.push(m.p99_cold_start_ms);
+        if (chart.data.labels.length > 60) {
+          chart.data.labels.shift();
+          chart.data.datasets.forEach(d => d.data.shift());
+        }
+        chart.update('none');
+
+        renderWorkers(m.workers || []);
+      } catch (e) {
+        setOnline(false);
+      }
+    }
+    setInterval(poll, 1000);
+    poll();
+  </script>
+</body>
+</html>

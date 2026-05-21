@@ -32,25 +32,11 @@ Full table (including numpy) in `benchmarks/`.
 
 ## Architecture
 
-```
-┌────────────────────────────────────────────┐
-│  Python SDK (@app.function)                │
-│  cloudpickle → InvokeFunction gRPC         │
-└──────────────────┬─────────────────────────┘
-                   │ gRPC :50051
-┌──────────────────▼─────────────────────────┐
-│  Go Orchestrator                           │
-│  dispatch queue · job state machine        │
-│  heartbeat reaper · BoltDB WAL             │
-│  HTTP /metrics + dashboard :8080           │
-└──────────────────┬─────────────────────────┘
-                   │ gRPC ExecuteTask
-┌──────────────────▼─────────────────────────┐
-│  Python Worker Pool                        │
-│  inproc / fork-warm / naive subprocess     │
-│  CRIU checkpoint+restore (stubbed)         │
-└────────────────────────────────────────────┘
-```
+Three tiers, one box. A call flows: **SDK → orchestrator → worker → back**.
+
+- **Python SDK** — `@app.function` decorator cloudpickle-serializes the call and sends it over gRPC. Returns a `Future`.
+- **Go orchestrator** (`:50051` gRPC, `:8080` HTTP) — async dispatch queue, job state machine (PENDING → RUNNING → DONE/FAILED), heartbeat-based worker reaper, BoltDB WAL so jobs survive crashes, live metrics dashboard.
+- **Python worker pool** — pluggable cold-start strategy (`inproc` / `fork`-from-warm-pool / `naive` subprocess), cloudpickle deserialize + execute, CRIU checkpoint/restore hooks stubbed for v2.
 
 ## What's in here
 

@@ -19,18 +19,26 @@ type Config struct {
 	WorkerTimeout time.Duration
 	// Recommended interval; sent to workers in RegisterWorkerResponse.
 	HeartbeatInterval time.Duration
-	// Max retries before a job is marked FAILED.
+	// Max retries before a job is marked FAILED (worker-death retries).
 	MaxRetries int
+	// Max dispatch attempts per call before a job is marked FAILED. Prevents
+	// a job from spinning forever when no workers are available or all
+	// workers keep NACKing.
+	MaxDispatchAttempts int
+	// Per-call gRPC timeout when sending ExecuteTask to a worker.
+	ExecuteTaskTimeout time.Duration
 }
 
 func LoadConfig() Config {
 	return Config{
-		GRPCPort:          envInt("MINIMODAL_PORT", 50051),
-		HTTPPort:          envInt("MINIMODAL_HTTP_PORT", 8080),
-		DBPath:            envStr("MINIMODAL_DB_PATH", "minimodal.db"),
-		WorkerTimeout:     envDuration("MINIMODAL_WORKER_TIMEOUT", 6*time.Second),
-		HeartbeatInterval: envDuration("MINIMODAL_HEARTBEAT_INTERVAL", 2*time.Second),
-		MaxRetries:        envInt("MINIMODAL_MAX_RETRIES", 3),
+		GRPCPort:            envInt("MINIMODAL_PORT", 50051),
+		HTTPPort:            envInt("MINIMODAL_HTTP_PORT", 8080),
+		DBPath:              envStr("MINIMODAL_DB_PATH", "minimodal.db"),
+		WorkerTimeout:       envDuration("MINIMODAL_WORKER_TIMEOUT", 6*time.Second),
+		HeartbeatInterval:   envDuration("MINIMODAL_HEARTBEAT_INTERVAL", 2*time.Second),
+		MaxRetries:          envInt("MINIMODAL_MAX_RETRIES", 3),
+		MaxDispatchAttempts: envInt("MINIMODAL_MAX_DISPATCH_ATTEMPTS", 30),
+		ExecuteTaskTimeout:  envDuration("MINIMODAL_EXECUTE_TASK_TIMEOUT", 5*time.Second),
 	}
 }
 

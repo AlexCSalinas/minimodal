@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"time"
 
@@ -54,6 +55,7 @@ func NewServer(cfg Config) (*Server, error) {
 	}
 	pool := NewWorkerPool(cfg.WorkerTimeout)
 	sched := NewScheduler(pool, store)
+	sched.SetRPCTimeout(cfg.ExecuteTaskTimeout)
 	srv := &Server{
 		cfg:          cfg,
 		workerPool:   pool,
@@ -128,7 +130,11 @@ func (s *Server) RunPendingQueueLoop(ctx context.Context) {
 func (s *Server) attemptDispatch(ctx context.Context, jobID string) {
 	backoff := 100 * time.Millisecond
 	const maxBackoff = 2 * time.Second
-	for {
+	maxAttempts := s.cfg.MaxDispatchAttempts
+	if maxAttempts < 1 {
+		maxAttempts = 30
+	}
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		err := s.scheduler.Dispatch(ctx, jobID)
 		if err == nil {
 			return
@@ -137,7 +143,10 @@ func (s *Server) attemptDispatch(ctx context.Context, jobID string) {
 			return
 		}
 		if errors.Is(err, ErrNoWorkersAvailable) || errors.Is(err, ErrAllWorkersExhausted) {
-			// Workers are absent or busy — wait and retry.
+			// Workers are absent or busy — wait and retry, up to maxAttempts.
+			if attempt == maxAttempts {
+				break
+			}
 			select {
 			case <-ctx.Done():
 				return
@@ -160,6 +169,18 @@ func (s *Server) attemptDispatch(ctx context.Context, jobID string) {
 		})
 		return
 	}
+
+	// Exhausted all dispatch attempts (no workers ever became available).
+	log.Printf("dispatch job=%s exhausted %d attempts — marking FAILED", jobID, maxAttempts)
+	_, _ = s.jobStore.Transition(jobID, func(r *JobRecord) error {
+		if r.Status == StatusDone || r.Status == StatusFailed {
+			return ErrSkipTransition
+		}
+		r.Status = StatusFailed
+		r.Error = fmt.Sprintf("dispatch failed: no worker accepted after %d attempts", maxAttempts)
+		return nil
+	})
+	s.metrics.RecordFailed()
 }
 
 func (s *Server) enqueue(jobID string) {

@@ -28,8 +28,9 @@ var (
 )
 
 type Scheduler struct {
-	pool     *WorkerPool
-	jobStore *JobStore
+	pool       *WorkerPool
+	jobStore   *JobStore
+	rpcTimeout time.Duration
 
 	mu       sync.Mutex
 	channels map[string]*grpc.ClientConn // keyed by worker_id
@@ -37,9 +38,19 @@ type Scheduler struct {
 
 func NewScheduler(pool *WorkerPool, jobStore *JobStore) *Scheduler {
 	return &Scheduler{
-		pool:     pool,
-		jobStore: jobStore,
-		channels: make(map[string]*grpc.ClientConn),
+		pool:       pool,
+		jobStore:   jobStore,
+		rpcTimeout: 5 * time.Second,
+		channels:   make(map[string]*grpc.ClientConn),
+	}
+}
+
+// SetRPCTimeout overrides the default 5s ExecuteTask deadline.
+func (s *Scheduler) SetRPCTimeout(d time.Duration) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if d > 0 {
+		s.rpcTimeout = d
 	}
 }
 
@@ -130,7 +141,7 @@ func (s *Scheduler) sendExecuteTask(ctx context.Context, workerID, address strin
 		return fmt.Errorf("dial %s: %w", address, err)
 	}
 	client := pb.NewWorkerClient(conn)
-	rpcCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	rpcCtx, cancel := context.WithTimeout(ctx, s.rpcTimeout)
 	defer cancel()
 	resp, err := client.ExecuteTask(rpcCtx, &pb.ExecuteTaskRequest{
 		JobId:         rec.ID,

@@ -35,7 +35,7 @@ func main() {
 		log.Fatalf("WAL replay: %v", err)
 	}
 
-	grpcServer := grpc.NewServer()
+	grpcServer := grpc.NewServer(grpc.UnaryInterceptor(recoveryUnaryInterceptor))
 	pb.RegisterOrchestratorServer(grpcServer, srv)
 
 	bgCtx, cancelBg := context.WithCancel(context.Background())

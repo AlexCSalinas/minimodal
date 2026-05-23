@@ -1,4 +1,4 @@
-.PHONY: help proto proto-go proto-py orchestrator worker-deps test run clean tools
+.PHONY: help proto proto-go proto-py orchestrator worker-deps test test-integration ci run clean tools
 
 # Project root.
 ROOT := $(shell pwd)
@@ -19,7 +19,9 @@ help:
 	@echo "  make orchestrator  Build the Go orchestrator binary"
 	@echo "  make worker-deps   pip install Python worker + SDK dependencies"
 	@echo "  make run           docker-compose up orchestrator + workers"
-	@echo "  make test          Run Go + Python tests"
+	@echo "  make test          Run Go unit tests (with race detector)"
+	@echo "  make test-integration  Run Python end-to-end tests (boots orchestrator + worker)"
+	@echo "  make ci            Run the same checks CI runs: gofmt, vet, test, build"
 	@echo "  make clean         Remove build artifacts and generated stubs"
 
 # One-time toolchain setup. Idempotent.
@@ -68,8 +70,22 @@ worker-deps:
 	$(PYTHON) -m pip install -e sdk
 
 test:
-	cd orchestrator && go test ./...
-	$(PYTHON) -m pytest -q sdk worker || true
+	cd orchestrator && go test -race ./...
+
+# Integration tests boot the actual orchestrator binary + a worker, so the
+# binary must already be built and proto stubs generated.
+test-integration: orchestrator
+	$(PYTHON) tests/test_idempotency.py
+	$(PYTHON) tests/test_fault_tolerance.py
+
+# Mirror what .github/workflows/ci.yml runs — useful for catching CI failures
+# before pushing.
+ci:
+	@unformatted=$$(cd orchestrator && gofmt -l .); \
+		if [ -n "$$unformatted" ]; then echo "gofmt needed:"; echo "$$unformatted"; exit 1; fi
+	cd orchestrator && go vet ./...
+	cd orchestrator && go test -race ./...
+	cd orchestrator && go build -o orchestrator .
 
 run:
 	docker-compose up --build

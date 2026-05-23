@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"sync/atomic"
 	"time"
 
 	pb "minimodal/orchestrator/pb"
@@ -41,6 +42,13 @@ type Server struct {
 	// (which is the source of truth — important for idempotency after
 	// orchestrator restart).
 	results *lruResults
+
+	// Set to true once shutdown begins. enqueue() checks this so that an
+	// InvokeFunction RPC that lands during graceful shutdown doesn't block
+	// forever trying to send to a pendingQueue whose drainer is about to
+	// exit. The job is already persisted to BoltDB; recovery on the next
+	// startup will pick it up via RecoverUnfinishedJobs.
+	shuttingDown atomic.Bool
 }
 
 const (
@@ -184,12 +192,28 @@ func (s *Server) attemptDispatch(ctx context.Context, jobID string) {
 }
 
 func (s *Server) enqueue(jobID string) {
+	if s.shuttingDown.Load() {
+		// Shutdown in progress — the drainer goroutine is about to exit, so
+		// sending to pendingQueue could block forever. The job is already
+		// persisted to BoltDB as PENDING; RecoverUnfinishedJobs on the next
+		// startup will re-enqueue it.
+		log.Printf("enqueue skipped during shutdown: job=%s (will recover on restart)", jobID)
+		return
+	}
 	select {
 	case s.pendingQueue <- jobID:
 	default:
 		// Queue full — block. Better to apply backpressure than drop jobs.
 		s.pendingQueue <- jobID
 	}
+}
+
+// BeginShutdown flags the server as draining: subsequent enqueue() calls
+// become no-ops (job stays PENDING in BoltDB, recovered on next startup).
+// Call this BEFORE grpcServer.GracefulStop so in-flight InvokeFunction RPCs
+// don't deadlock on a queue whose drainer has already exited.
+func (s *Server) BeginShutdown() {
+	s.shuttingDown.Store(true)
 }
 
 // =============================================================================

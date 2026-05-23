@@ -107,6 +107,29 @@ func TestServer_Heartbeat_UnknownWorkerSignalsDrain(t *testing.T) {
 	}
 }
 
+// enqueue must not block once shutdown has begun — otherwise an InvokeFunction
+// RPC landing during graceful shutdown could deadlock the gRPC server. The
+// job is already in BoltDB; recovery will pick it up on next startup.
+func TestServer_Enqueue_NonBlockingDuringShutdown(t *testing.T) {
+	srv := newTestServer(t, Config{})
+	// Saturate the queue so enqueue would normally block on send.
+	for i := 0; i < pendingQueueSize; i++ {
+		srv.pendingQueue <- "filler"
+	}
+	srv.BeginShutdown()
+
+	done := make(chan struct{})
+	go func() {
+		srv.enqueue("post-shutdown-job")
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("enqueue blocked after BeginShutdown — would deadlock graceful shutdown")
+	}
+}
+
 // Idempotency: two InvokeFunction calls with the same key return the same
 // job_id; only one job is enqueued.
 func TestServer_InvokeFunction_IdempotentKey(t *testing.T) {

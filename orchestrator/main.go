@@ -68,7 +68,12 @@ func main() {
 		log.Printf("grpc server exited: %v", err)
 	}
 
-	cancelBg()
+	// Order matters: flag shutdown first so new InvokeFunction RPCs that
+	// land during the drain window don't try to enqueue into a channel whose
+	// drainer is about to exit. Then GracefulStop to let in-flight RPCs
+	// finish. Only then cancel the background goroutines.
+	srv.BeginShutdown()
+
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	done := make(chan struct{})
@@ -83,4 +88,5 @@ func main() {
 		log.Printf("graceful shutdown deadline; forcing stop")
 		grpcServer.Stop()
 	}
+	cancelBg()
 }

@@ -33,9 +33,9 @@ func NewMetrics() *Metrics {
 	}
 }
 
-func (m *Metrics) RecordInvocation()        { m.totalInvocations.Add(1) }
-func (m *Metrics) RecordCompleted()         { m.totalCompleted.Add(1) }
-func (m *Metrics) RecordFailed()            { m.totalFailed.Add(1) }
+func (m *Metrics) RecordInvocation() { m.totalInvocations.Add(1) }
+func (m *Metrics) RecordCompleted()  { m.totalCompleted.Add(1) }
+func (m *Metrics) RecordFailed()     { m.totalFailed.Add(1) }
 
 func (m *Metrics) RecordColdStart(ms int64) {
 	if ms < 0 {

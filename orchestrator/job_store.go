@@ -20,9 +20,9 @@ import (
 // payload_size, payload_sha256} so recovery can re-fetch.
 
 const (
-	bucketJobs         = "jobs"
-	bucketWorkers      = "workers"
-	bucketIdempotency  = "idempotency"
+	bucketJobs        = "jobs"
+	bucketWorkers     = "workers"
+	bucketIdempotency = "idempotency"
 )
 
 type JobStatus string
@@ -193,9 +193,9 @@ func (s *JobStore) ListUnfinished() ([]JobRecord, error) {
 // Return values:
 //   - jobID:   the ID the caller should treat as authoritative
 //   - created: true if a new job was inserted (caller should enqueue for
-//              dispatch), false if the key matched an existing job (caller
-//              should NOT enqueue — the existing job is already being
-//              processed or has already finished)
+//     dispatch), false if the key matched an existing job (caller
+//     should NOT enqueue — the existing job is already being
+//     processed or has already finished)
 func (s *JobStore) SubmitWithIdempotency(rec JobRecord, idempotencyKey string) (jobID string, created bool, err error) {
 	err = s.db.Update(func(tx *bolt.Tx) error {
 		jobs := tx.Bucket([]byte(bucketJobs))

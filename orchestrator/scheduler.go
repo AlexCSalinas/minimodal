@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -132,7 +132,8 @@ func (s *Scheduler) Dispatch(ctx context.Context, jobID string) error {
 		if err := s.sendExecuteTask(ctx, workerID, address, rec); err == nil {
 			return nil
 		} else {
-			log.Printf("dispatch job=%s worker=%s err=%v — trying another worker", jobID, workerID, err)
+			slog.Warn("dispatch failed; trying another worker",
+				"job", jobID, "worker", workerID, "err", err)
 		}
 
 		// Worker NACK'd or unreachable — revert to PENDING for the next attempt

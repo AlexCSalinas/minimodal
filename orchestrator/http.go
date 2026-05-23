@@ -3,7 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"log"
+	"log/slog"
 	"net/http"
 	"net/http/pprof"
 	"os"
@@ -31,7 +31,7 @@ func NewHTTPServer(app *Server, port int) *HTTPServer {
 	// useful for an operator, but not safe to leave open on a public-facing
 	// orchestrator. Set MINIMODAL_PPROF=1 to enable.
 	if os.Getenv("MINIMODAL_PPROF") == "1" {
-		log.Printf("pprof endpoints enabled at /debug/pprof/")
+		slog.Info("pprof endpoints enabled", "prefix", "/debug/pprof/")
 		h.mux.HandleFunc("/debug/pprof/", pprof.Index)
 		h.mux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
 		h.mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
@@ -40,10 +40,10 @@ func NewHTTPServer(app *Server, port int) *HTTPServer {
 	}
 
 	if dashPath := resolveDashboardPath(); dashPath != "" {
-		log.Printf("dashboard served from %s", dashPath)
+		slog.Info("dashboard mounted", "path", dashPath)
 		h.mux.Handle("/", http.FileServer(http.Dir(dashPath)))
 	} else {
-		log.Printf("dashboard not found (set MINIMODAL_DASHBOARD_PATH to enable)")
+		slog.Warn("dashboard not found; set MINIMODAL_DASHBOARD_PATH to enable")
 		h.mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 			if r.URL.Path != "/" {
 				http.NotFound(w, r)
@@ -65,7 +65,7 @@ func NewHTTPServer(app *Server, port int) *HTTPServer {
 func (h *HTTPServer) Run(ctx context.Context) error {
 	errCh := make(chan error, 1)
 	go func() {
-		log.Printf("http server listening on %s", h.srv.Addr)
+		slog.Info("http server listening", "addr", h.srv.Addr)
 		err := h.srv.ListenAndServe()
 		if err != nil && err != http.ErrServerClosed {
 			errCh <- err

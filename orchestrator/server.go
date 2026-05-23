@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"sync/atomic"
 	"time"
 
@@ -112,12 +112,12 @@ func (s *Server) RecoverUnfinishedJobs() error {
 			}
 			return nil
 		}); err != nil {
-			log.Printf("warn: recover transition %s: %v", j.ID, err)
+			slog.Warn("WAL replay: transition failed", "job", j.ID, "err", err)
 			continue
 		}
 		s.enqueue(j.ID)
 	}
-	log.Printf("WAL replay: recovered %d unfinished job(s)", len(jobs))
+	slog.Info("WAL replay completed", "recovered", len(jobs))
 	return nil
 }
 
@@ -166,7 +166,7 @@ func (s *Server) attemptDispatch(ctx context.Context, jobID string) {
 			continue
 		}
 		// Unexpected — mark FAILED and move on.
-		log.Printf("dispatch job=%s permanent error: %v", jobID, err)
+		slog.Error("dispatch permanent error", "job", jobID, "err", err)
 		_, _ = s.jobStore.Transition(jobID, func(r *JobRecord) error {
 			if r.Status == StatusDone || r.Status == StatusFailed {
 				return ErrSkipTransition
@@ -179,7 +179,7 @@ func (s *Server) attemptDispatch(ctx context.Context, jobID string) {
 	}
 
 	// Exhausted all dispatch attempts (no workers ever became available).
-	log.Printf("dispatch job=%s exhausted %d attempts — marking FAILED", jobID, maxAttempts)
+	slog.Error("dispatch exhausted attempts; marking FAILED", "job", jobID, "attempts", maxAttempts)
 	_, _ = s.jobStore.Transition(jobID, func(r *JobRecord) error {
 		if r.Status == StatusDone || r.Status == StatusFailed {
 			return ErrSkipTransition
@@ -197,7 +197,7 @@ func (s *Server) enqueue(jobID string) {
 		// sending to pendingQueue could block forever. The job is already
 		// persisted to BoltDB as PENDING; RecoverUnfinishedJobs on the next
 		// startup will re-enqueue it.
-		log.Printf("enqueue skipped during shutdown: job=%s (will recover on restart)", jobID)
+		slog.Info("enqueue skipped during shutdown", "job", jobID, "note", "will recover on restart")
 		return
 	}
 	select {
@@ -222,7 +222,7 @@ func (s *Server) BeginShutdown() {
 func (s *Server) ReassignJobsOf(workerID string) {
 	jobs, err := s.jobStore.ListRunningOnWorker(workerID)
 	if err != nil {
-		log.Printf("reaper: list running for %s: %v", workerID, err)
+		slog.Error("reaper: list-running failed", "worker", workerID, "err", err)
 		return
 	}
 	for _, j := range jobs {
@@ -251,7 +251,7 @@ func (s *Server) ReassignJobsOf(workerID string) {
 			return nil
 		})
 		if err != nil {
-			log.Printf("reaper: transition %s: %v", j.ID, err)
+			slog.Error("reaper: transition failed", "job", j.ID, "err", err)
 			continue
 		}
 		if !committed {
@@ -259,11 +259,14 @@ func (s *Server) ReassignJobsOf(workerID string) {
 			continue
 		}
 		if markedPending {
-			log.Printf("reaper: requeue job=%s (retry %d/%d) after worker=%s death",
-				j.ID, j.RetryCount+1, s.cfg.MaxRetries, workerID)
+			slog.Info("reaper: requeue after worker death",
+				"job", j.ID,
+				"worker", workerID,
+				"retry", j.RetryCount+1,
+				"max_retries", s.cfg.MaxRetries)
 			s.enqueue(j.ID)
 		} else if markedFailed {
-			log.Printf("reaper: job=%s exceeded max retries — marked FAILED", j.ID)
+			slog.Warn("reaper: max retries exceeded; marked FAILED", "job", j.ID)
 		}
 	}
 }
@@ -279,7 +282,10 @@ func (s *Server) RegisterWorker(ctx context.Context, req *pb.RegisterWorkerReque
 		req.Capacity = 1
 	}
 	s.workerPool.Register(req.WorkerId, req.Address, int(req.Capacity))
-	log.Printf("registered worker id=%s addr=%s capacity=%d", req.WorkerId, req.Address, req.Capacity)
+	slog.Info("worker registered",
+		"worker", req.WorkerId,
+		"address", req.Address,
+		"capacity", req.Capacity)
 	return &pb.RegisterWorkerResponse{
 		WorkerId:            req.WorkerId,
 		HeartbeatIntervalMs: int32(s.cfg.HeartbeatInterval.Milliseconds()),
@@ -342,8 +348,12 @@ func (s *Server) ReportTaskResult(ctx context.Context, req *pb.ReportTaskResultR
 		s.metrics.RecordFailed()
 	}
 
-	log.Printf("task done job=%s worker=%s success=%v cold_start_ms=%d exec_ms=%d",
-		req.JobId, req.WorkerId, req.Success, req.ColdStartMs, req.ExecutionMs)
+	slog.Info("task done",
+		"job", req.JobId,
+		"worker", req.WorkerId,
+		"success", req.Success,
+		"cold_start_ms", req.ColdStartMs,
+		"execution_ms", req.ExecutionMs)
 	return &pb.ReportTaskResultResponse{Acknowledged: true}, nil
 }
 
@@ -378,10 +388,14 @@ func (s *Server) InvokeFunction(ctx context.Context, req *pb.InvokeFunctionReque
 	if created {
 		s.enqueue(jobID)
 		s.metrics.RecordInvocation()
-		log.Printf("invoked job=%s function=%s bytes=%d key=%q",
-			jobID, req.FunctionName, len(req.FunctionBytes), req.IdempotencyKey)
+		slog.Info("invoked",
+			"job", jobID,
+			"function", req.FunctionName,
+			"payload_bytes", len(req.FunctionBytes),
+			"idempotency_key", req.IdempotencyKey)
 	} else {
-		log.Printf("idempotent: returning existing job=%s for key=%q", jobID, req.IdempotencyKey)
+		slog.Info("idempotent hit; returning existing job",
+			"job", jobID, "idempotency_key", req.IdempotencyKey)
 	}
 	return &pb.InvokeFunctionResponse{JobId: jobID}, nil
 }

@@ -2,7 +2,7 @@ package main
 
 import (
 	"context"
-	"log"
+	"log/slog"
 	"net"
 	"os"
 	"os/signal"
@@ -15,24 +15,42 @@ import (
 	"google.golang.org/grpc"
 )
 
+// configureLogger installs a slog handler as the default logger. Defaults to
+// text for human readability; flip MINIMODAL_LOG_FORMAT=json for a structured
+// stream that log aggregators can parse.
+func configureLogger() {
+	var handler slog.Handler
+	opts := &slog.HandlerOptions{Level: slog.LevelInfo}
+	if os.Getenv("MINIMODAL_LOG_FORMAT") == "json" {
+		handler = slog.NewJSONHandler(os.Stderr, opts)
+	} else {
+		handler = slog.NewTextHandler(os.Stderr, opts)
+	}
+	slog.SetDefault(slog.New(handler))
+}
+
 func main() {
+	configureLogger()
 	cfg := LoadConfig()
 
 	listener, err := net.Listen("tcp", ":"+strconv.Itoa(cfg.GRPCPort))
 	if err != nil {
-		log.Fatalf("listen :%d: %v", cfg.GRPCPort, err)
+		slog.Error("listen failed", "port", cfg.GRPCPort, "err", err)
+		os.Exit(1)
 	}
 
 	srv, err := NewServer(cfg)
 	if err != nil {
-		log.Fatalf("init server: %v", err)
+		slog.Error("init server failed", "err", err)
+		os.Exit(1)
 	}
 	defer srv.Close()
 
 	// Phase 4: WAL replay. Must run before the gRPC server starts accepting
 	// new InvokeFunction calls, so recovered jobs queue up before fresh ones.
 	if err := srv.RecoverUnfinishedJobs(); err != nil {
-		log.Fatalf("WAL replay: %v", err)
+		slog.Error("WAL replay failed", "err", err)
+		os.Exit(1)
 	}
 
 	// MaxRecvMsgSize set generously above the application-level
@@ -56,11 +74,15 @@ func main() {
 	httpServer := NewHTTPServer(srv, cfg.HTTPPort)
 	go func() {
 		if err := httpServer.Run(bgCtx); err != nil {
-			log.Printf("http server error: %v", err)
+			slog.Error("http server error", "err", err)
 		}
 	}()
 
-	log.Printf("orchestrator listening on :%d (db=%s)", cfg.GRPCPort, cfg.DBPath)
+	slog.Info("orchestrator listening",
+		"grpc_port", cfg.GRPCPort,
+		"http_port", cfg.HTTPPort,
+		"db_path", cfg.DBPath,
+		"max_payload_bytes", cfg.MaxPayloadBytes)
 
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- grpcServer.Serve(listener) }()
@@ -70,9 +92,9 @@ func main() {
 
 	select {
 	case sig := <-stop:
-		log.Printf("got signal %v, shutting down...", sig)
+		slog.Info("shutdown signal received", "signal", sig.String())
 	case err := <-serveErr:
-		log.Printf("grpc server exited: %v", err)
+		slog.Warn("grpc server exited", "err", err)
 	}
 
 	// Order matters: flag shutdown first so new InvokeFunction RPCs that
@@ -90,9 +112,9 @@ func main() {
 	}()
 	select {
 	case <-done:
-		log.Printf("shut down cleanly")
+		slog.Info("shut down cleanly")
 	case <-shutdownCtx.Done():
-		log.Printf("graceful shutdown deadline; forcing stop")
+		slog.Warn("graceful shutdown deadline exceeded; forcing stop")
 		grpcServer.Stop()
 	}
 	cancelBg()

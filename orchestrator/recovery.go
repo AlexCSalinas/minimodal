@@ -2,7 +2,7 @@ package main
 
 import (
 	"context"
-	"log"
+	"log/slog"
 	"runtime/debug"
 
 	"google.golang.org/grpc"
@@ -16,7 +16,10 @@ import (
 func recoveryUnaryInterceptor(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (resp any, err error) {
 	defer func() {
 		if r := recover(); r != nil {
-			log.Printf("PANIC in %s: %v\n%s", info.FullMethod, r, debug.Stack())
+			slog.Error("PANIC in gRPC handler",
+				"method", info.FullMethod,
+				"panic", r,
+				"stack", string(debug.Stack()))
 			err = status.Errorf(codes.Internal, "internal server panic")
 		}
 	}()

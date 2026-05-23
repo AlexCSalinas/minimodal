@@ -2,7 +2,7 @@ package main
 
 import (
 	"context"
-	"log"
+	"log/slog"
 	"sync"
 	"time"
 )
@@ -68,7 +68,7 @@ func (p *WorkerPool) RecordHeartbeat(id string, activeTasks int) bool {
 	}
 	if !w.alive {
 		w.alive = true
-		log.Printf("worker %s resurrected (was marked dead)", id)
+		slog.Info("worker resurrected (was marked dead)", "worker", id)
 	}
 	w.lastHeartbeat = time.Now()
 	w.activeTasks = activeTasks
@@ -114,7 +114,7 @@ func (p *WorkerPool) RunFaultDetector(ctx context.Context) {
 		case <-ticker.C:
 			dead := p.sweep()
 			for _, id := range dead {
-				log.Printf("worker %s marked DEAD", id)
+				slog.Warn("worker marked DEAD", "worker", id)
 				if reaper := p.getReaper(); reaper != nil {
 					reaper.ReassignJobsOf(id)
 				}

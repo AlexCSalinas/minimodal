@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"log"
-	"sync"
 	"time"
 
 	pb "minimodal/orchestrator/pb"
@@ -37,11 +36,16 @@ type Server struct {
 	// per-worker deques with stealing for higher throughput.
 	pendingQueue chan string
 
-	resultsMu sync.RWMutex
-	results   map[string]resultEntry
+	// Bounded LRU of completed-job results; cache miss falls back to BoltDB
+	// (which is the source of truth — important for idempotency after
+	// orchestrator restart).
+	results *lruResults
 }
 
-const pendingQueueSize = 10000
+const (
+	pendingQueueSize = 10000
+	resultsCacheSize = 10000
+)
 
 func NewServer(cfg Config) (*Server, error) {
 	store, err := NewJobStore(cfg.DBPath)
@@ -57,7 +61,7 @@ func NewServer(cfg Config) (*Server, error) {
 		jobStore:     store,
 		metrics:      NewMetrics(),
 		pendingQueue: make(chan string, pendingQueueSize),
-		results:      make(map[string]resultEntry),
+		results:      newLRUResults(resultsCacheSize),
 	}
 	// WorkerPool calls back into Server when workers die.
 	pool.SetReaper(srv)
@@ -253,14 +257,12 @@ func (s *Server) ReportTaskResult(ctx context.Context, req *pb.ReportTaskResultR
 		return nil, status.Error(codes.InvalidArgument, "job_id required")
 	}
 
-	s.resultsMu.Lock()
-	s.results[req.JobId] = resultEntry{
+	s.results.Put(req.JobId, resultEntry{
 		resultBytes: req.ResultBytes,
 		errorMsg:    req.Error,
 		coldStartMs: req.ColdStartMs,
 		executionMs: req.ExecutionMs,
-	}
-	s.resultsMu.Unlock()
+	})
 
 	_, err := s.jobStore.Transition(req.JobId, func(rec *JobRecord) error {
 		if rec.Status == StatusDone || rec.Status == StatusFailed {
@@ -393,9 +395,7 @@ func (s *Server) GetJobStatus(ctx context.Context, req *pb.GetJobStatusRequest) 
 	if rec.Status == StatusDone || rec.Status == StatusFailed {
 		// Prefer the in-memory cache (most-recent result for currently-live
 		// orchestrator). Fall back to BoltDB (survives restart).
-		s.resultsMu.RLock()
-		entry, hit := s.results[rec.ID]
-		s.resultsMu.RUnlock()
+		entry, hit := s.results.Get(rec.ID)
 		if hit {
 			resp.ResultBytes = entry.resultBytes
 			resp.ColdStartMs = entry.coldStartMs

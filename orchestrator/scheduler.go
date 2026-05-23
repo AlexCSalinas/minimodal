@@ -12,7 +12,20 @@ import (
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/keepalive"
 )
+
+// Keepalive parameters for worker connections. Without these, a worker
+// connection silently broken by a network partition or NAT timeout would
+// hang the next ExecuteTask until the per-call gRPC timeout fired. With
+// these, gRPC pings idle connections and proactively tears down half-open
+// ones, so the cached *grpc.ClientConn never returns a "live" channel that
+// is actually dead.
+var workerKeepalive = keepalive.ClientParameters{
+	Time:                10 * time.Second,
+	Timeout:             3 * time.Second,
+	PermitWithoutStream: true,
+}
 
 // Scheduler routes jobs to workers.
 //
@@ -165,7 +178,11 @@ func (s *Scheduler) getOrDial(workerID, address string) (*grpc.ClientConn, error
 	if conn, ok := s.channels[workerID]; ok {
 		return conn, nil
 	}
-	conn, err := grpc.NewClient(address, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	conn, err := grpc.NewClient(
+		address,
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithKeepaliveParams(workerKeepalive),
+	)
 	if err != nil {
 		return nil, err
 	}

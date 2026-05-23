@@ -1,5 +1,8 @@
 # minimodal
 
+[![ci](https://github.com/AlexCSalinas/minimodal/actions/workflows/ci.yml/badge.svg)](https://github.com/AlexCSalinas/minimodal/actions/workflows/ci.yml)
+[![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
+
 > A from-scratch reimplementation of [Modal's](https://modal.com) serverless
 > function runtime. Go orchestrator + Python worker pool, ~3K lines.
 >

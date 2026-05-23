@@ -17,6 +17,21 @@ func newTestStore(t *testing.T) *JobStore {
 	return store
 }
 
+func TestJobStore_Ping_OnOpenStoreReturnsNil(t *testing.T) {
+	store := newTestStore(t)
+	if err := store.Ping(); err != nil {
+		t.Errorf("Ping on healthy store: want nil, got %v", err)
+	}
+}
+
+func TestJobStore_Ping_OnClosedStoreReturnsErr(t *testing.T) {
+	store := newTestStore(t)
+	_ = store.Close()
+	if err := store.Ping(); err == nil {
+		t.Error("Ping on closed store should return error")
+	}
+}
+
 func TestJobStore_PutGet(t *testing.T) {
 	store := newTestStore(t)
 

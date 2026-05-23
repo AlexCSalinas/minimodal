@@ -27,6 +27,10 @@ type Config struct {
 	MaxDispatchAttempts int
 	// Per-call gRPC timeout when sending ExecuteTask to a worker.
 	ExecuteTaskTimeout time.Duration
+	// Hard upper bound on len(function_bytes)+len(args_bytes) per
+	// InvokeFunction call. Prevents a buggy or malicious client from
+	// allocating arbitrary memory on the orchestrator.
+	MaxPayloadBytes int
 }
 
 func LoadConfig() Config {
@@ -39,6 +43,7 @@ func LoadConfig() Config {
 		MaxRetries:          envInt("MINIMODAL_MAX_RETRIES", 3),
 		MaxDispatchAttempts: envInt("MINIMODAL_MAX_DISPATCH_ATTEMPTS", 30),
 		ExecuteTaskTimeout:  envDuration("MINIMODAL_EXECUTE_TASK_TIMEOUT", 5*time.Second),
+		MaxPayloadBytes:     envInt("MINIMODAL_MAX_PAYLOAD_BYTES", 16*1024*1024), // 16 MiB
 	}
 }
 

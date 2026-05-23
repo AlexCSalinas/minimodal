@@ -35,7 +35,14 @@ func main() {
 		log.Fatalf("WAL replay: %v", err)
 	}
 
-	grpcServer := grpc.NewServer(grpc.UnaryInterceptor(recoveryUnaryInterceptor))
+	// MaxRecvMsgSize set generously above the application-level
+	// MaxPayloadBytes — the application check returns a clean InvalidArgument
+	// to the client, whereas hitting the gRPC limit returns a less helpful
+	// transport-level error.
+	grpcServer := grpc.NewServer(
+		grpc.UnaryInterceptor(recoveryUnaryInterceptor),
+		grpc.MaxRecvMsgSize(cfg.MaxPayloadBytes+1024*1024),
+	)
 	pb.RegisterOrchestratorServer(grpcServer, srv)
 
 	bgCtx, cancelBg := context.WithCancel(context.Background())

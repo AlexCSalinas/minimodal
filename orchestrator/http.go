@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"net/http/pprof"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -24,6 +25,19 @@ func NewHTTPServer(app *Server, port int) *HTTPServer {
 	h := &HTTPServer{app: app, mux: http.NewServeMux()}
 	h.mux.HandleFunc("/metrics", h.handleMetrics)
 	h.mux.HandleFunc("/healthz", h.handleHealthz)
+
+	// Opt-in pprof endpoints for production debugging. Off by default because
+	// /debug/pprof/* exposes goroutine stacks + heap profile + CPU traces —
+	// useful for an operator, but not safe to leave open on a public-facing
+	// orchestrator. Set MINIMODAL_PPROF=1 to enable.
+	if os.Getenv("MINIMODAL_PPROF") == "1" {
+		log.Printf("pprof endpoints enabled at /debug/pprof/")
+		h.mux.HandleFunc("/debug/pprof/", pprof.Index)
+		h.mux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
+		h.mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
+		h.mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
+		h.mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
+	}
 
 	if dashPath := resolveDashboardPath(); dashPath != "" {
 		log.Printf("dashboard served from %s", dashPath)
@@ -83,6 +97,11 @@ func (h *HTTPServer) handleMetrics(w http.ResponseWriter, r *http.Request) {
 
 func (h *HTTPServer) handleHealthz(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/plain")
+	if err := h.app.jobStore.Ping(); err != nil {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte("unhealthy: " + err.Error() + "\n"))
+		return
+	}
 	_, _ = w.Write([]byte("ok\n"))
 }
 

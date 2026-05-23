@@ -130,6 +130,19 @@ func TestServer_Enqueue_NonBlockingDuringShutdown(t *testing.T) {
 	}
 }
 
+// InvokeFunction must reject payloads above MaxPayloadBytes — protects the
+// orchestrator from a buggy/malicious client allocating arbitrary memory.
+func TestServer_InvokeFunction_RejectsOversizedPayload(t *testing.T) {
+	srv := newTestServer(t, Config{MaxPayloadBytes: 1024})
+	_, err := srv.InvokeFunction(context.Background(), &pb.InvokeFunctionRequest{
+		FunctionBytes: make([]byte, 2048),
+		FunctionName:  "big",
+	})
+	if err == nil {
+		t.Fatal("expected payload-too-large error")
+	}
+}
+
 // Idempotency: two InvokeFunction calls with the same key return the same
 // job_id; only one job is enqueued.
 func TestServer_InvokeFunction_IdempotentKey(t *testing.T) {

@@ -354,6 +354,13 @@ func (s *Server) InvokeFunction(ctx context.Context, req *pb.InvokeFunctionReque
 	if len(req.FunctionBytes) == 0 {
 		return nil, status.Error(codes.InvalidArgument, "function_bytes required")
 	}
+	if max := s.cfg.MaxPayloadBytes; max > 0 {
+		total := len(req.FunctionBytes) + len(req.ArgsBytes)
+		if total > max {
+			return nil, status.Errorf(codes.InvalidArgument,
+				"payload too large: %d bytes (max %d)", total, max)
+		}
+	}
 
 	rec := JobRecord{
 		ID:            uuid.NewString(),

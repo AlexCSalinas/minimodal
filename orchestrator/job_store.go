@@ -91,6 +91,16 @@ func (s *JobStore) Close() error {
 	return s.db.Close()
 }
 
+// Ping does a trivial read transaction to confirm the BoltDB handle is
+// responsive. Used by /healthz so the health probe catches a wedged store
+// rather than returning a hollow 200 OK.
+func (s *JobStore) Ping() error {
+	return s.db.View(func(tx *bolt.Tx) error {
+		_ = tx.Bucket([]byte(bucketJobs))
+		return nil
+	})
+}
+
 func (s *JobStore) PutJob(rec JobRecord) error {
 	rec.UpdatedAt = time.Now()
 	if rec.CreatedAt.IsZero() {

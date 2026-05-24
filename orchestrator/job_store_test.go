@@ -6,12 +6,12 @@ import (
 	"testing"
 )
 
-func newTestStore(t *testing.T) *JobStore {
+func newTestStore(t *testing.T) *BoltStore {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "test.db")
-	store, err := NewJobStore(path)
+	store, err := NewBoltStore(path)
 	if err != nil {
-		t.Fatalf("NewJobStore: %v", err)
+		t.Fatalf("NewBoltStore: %v", err)
 	}
 	t.Cleanup(func() { _ = store.Close() })
 	return store

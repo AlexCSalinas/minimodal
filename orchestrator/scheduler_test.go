@@ -13,7 +13,7 @@ import (
 	"google.golang.org/grpc"
 )
 
-func newTestScheduler(t *testing.T) (*Scheduler, *WorkerPool, *JobStore) {
+func newTestScheduler(t *testing.T) (*Scheduler, *WorkerPool, *BoltStore) {
 	t.Helper()
 	store := newTestStore(t)
 	pool := NewWorkerPool(time.Second)

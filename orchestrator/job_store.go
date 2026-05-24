@@ -9,7 +9,7 @@ import (
 	bolt "go.etcd.io/bbolt"
 )
 
-// JobStore is a thin BoltDB wrapper used as the orchestrator WAL.
+// BoltStore is a thin BoltDB wrapper used as the orchestrator WAL.
 //
 // Phase 4 design note: we persist the full payload (function_bytes + args_bytes)
 // because the WAL needs to be able to re-dispatch a job whose worker died
@@ -63,11 +63,31 @@ type JobRecord struct {
 	Error      string    `json:"error,omitempty"`
 }
 
-type JobStore struct {
+// Store is the abstract interface every JobStore implementation satisfies.
+// In single-node mode that's BoltStore (local BoltDB). In multi-node mode
+// it's RaftStore, which wraps a hashicorp/raft node whose FSM is a BoltStore.
+type Store interface {
+	PutJob(rec JobRecord) error
+	GetJob(id string) (*JobRecord, error)
+	Transition(jobID string, mutate func(*JobRecord) error) (bool, error)
+	SubmitWithIdempotency(rec JobRecord, idempotencyKey string) (string, bool, error)
+	ListUnfinished() ([]JobRecord, error)
+	ListRunningOnWorker(workerID string) ([]JobRecord, error)
+	Ping() error
+	Close() error
+}
+
+// BoltStore is the single-node Store implementation backed by a local BoltDB
+// file. Used directly by single-node deployments and embedded inside the
+// Raft FSM in multi-node deployments.
+type BoltStore struct {
 	db *bolt.DB
 }
 
-func NewJobStore(path string) (*JobStore, error) {
+// Compile-time assertion that BoltStore satisfies Store.
+var _ Store = (*BoltStore)(nil)
+
+func NewBoltStore(path string) (*BoltStore, error) {
 	db, err := bolt.Open(path, 0600, &bolt.Options{Timeout: 1 * time.Second})
 	if err != nil {
 		return nil, fmt.Errorf("open boltdb at %s: %w", path, err)
@@ -84,24 +104,24 @@ func NewJobStore(path string) (*JobStore, error) {
 		_ = db.Close()
 		return nil, err
 	}
-	return &JobStore{db: db}, nil
+	return &BoltStore{db: db}, nil
 }
 
-func (s *JobStore) Close() error {
+func (s *BoltStore) Close() error {
 	return s.db.Close()
 }
 
 // Ping does a trivial read transaction to confirm the BoltDB handle is
 // responsive. Used by /healthz so the health probe catches a wedged store
 // rather than returning a hollow 200 OK.
-func (s *JobStore) Ping() error {
+func (s *BoltStore) Ping() error {
 	return s.db.View(func(tx *bolt.Tx) error {
 		_ = tx.Bucket([]byte(bucketJobs))
 		return nil
 	})
 }
 
-func (s *JobStore) PutJob(rec JobRecord) error {
+func (s *BoltStore) PutJob(rec JobRecord) error {
 	rec.UpdatedAt = time.Now()
 	if rec.CreatedAt.IsZero() {
 		rec.CreatedAt = rec.UpdatedAt
@@ -115,7 +135,7 @@ func (s *JobStore) PutJob(rec JobRecord) error {
 	})
 }
 
-func (s *JobStore) GetJob(id string) (*JobRecord, error) {
+func (s *BoltStore) GetJob(id string) (*JobRecord, error) {
 	var rec *JobRecord
 	err := s.db.View(func(tx *bolt.Tx) error {
 		raw := tx.Bucket([]byte(bucketJobs)).Get([]byte(id))
@@ -137,7 +157,7 @@ func (s *JobStore) GetJob(id string) (*JobRecord, error) {
 // terminal — leave it alone). The first return value is true iff the mutator
 // ran cleanly AND the write committed; callers use this to detect "I lost
 // the race" situations.
-func (s *JobStore) Transition(jobID string, mutate func(*JobRecord) error) (bool, error) {
+func (s *BoltStore) Transition(jobID string, mutate func(*JobRecord) error) (bool, error) {
 	var committed bool
 	err := s.db.Update(func(tx *bolt.Tx) error {
 		bucket := tx.Bucket([]byte(bucketJobs))
@@ -176,7 +196,7 @@ var ErrSkipTransition = errors.New("skip transition")
 
 // ListUnfinished returns all jobs not in DONE/FAILED state. Used by Phase 4
 // WAL replay on orchestrator restart.
-func (s *JobStore) ListUnfinished() ([]JobRecord, error) {
+func (s *BoltStore) ListUnfinished() ([]JobRecord, error) {
 	var out []JobRecord
 	err := s.db.View(func(tx *bolt.Tx) error {
 		return tx.Bucket([]byte(bucketJobs)).ForEach(func(k, v []byte) error {
@@ -206,7 +226,7 @@ func (s *JobStore) ListUnfinished() ([]JobRecord, error) {
 //     dispatch), false if the key matched an existing job (caller
 //     should NOT enqueue — the existing job is already being
 //     processed or has already finished)
-func (s *JobStore) SubmitWithIdempotency(rec JobRecord, idempotencyKey string) (jobID string, created bool, err error) {
+func (s *BoltStore) SubmitWithIdempotency(rec JobRecord, idempotencyKey string) (jobID string, created bool, err error) {
 	err = s.db.Update(func(tx *bolt.Tx) error {
 		jobs := tx.Bucket([]byte(bucketJobs))
 		idx := tx.Bucket([]byte(bucketIdempotency))
@@ -243,7 +263,7 @@ func (s *JobStore) SubmitWithIdempotency(rec JobRecord, idempotencyKey string) (
 
 // ListRunningOnWorker returns all jobs currently RUNNING on a given worker.
 // Used by the reaper when a worker is declared dead.
-func (s *JobStore) ListRunningOnWorker(workerID string) ([]JobRecord, error) {
+func (s *BoltStore) ListRunningOnWorker(workerID string) ([]JobRecord, error) {
 	var out []JobRecord
 	err := s.db.View(func(tx *bolt.Tx) error {
 		return tx.Bucket([]byte(bucketJobs)).ForEach(func(k, v []byte) error {

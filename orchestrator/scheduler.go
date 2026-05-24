@@ -42,14 +42,14 @@ var (
 
 type Scheduler struct {
 	pool       *WorkerPool
-	jobStore   *JobStore
+	jobStore   Store
 	rpcTimeout time.Duration
 
 	mu       sync.Mutex
 	channels map[string]*grpc.ClientConn // keyed by worker_id
 }
 
-func NewScheduler(pool *WorkerPool, jobStore *JobStore) *Scheduler {
+func NewScheduler(pool *WorkerPool, jobStore Store) *Scheduler {
 	return &Scheduler{
 		pool:       pool,
 		jobStore:   jobStore,

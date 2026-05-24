@@ -29,7 +29,7 @@ type Server struct {
 	cfg        Config
 	workerPool *WorkerPool
 	scheduler  *Scheduler
-	jobStore   *JobStore
+	jobStore   Store
 	metrics    *Metrics
 
 	// Async dispatch: InvokeFunction + WAL replay + reaper all push job_ids
@@ -57,7 +57,7 @@ const (
 )
 
 func NewServer(cfg Config) (*Server, error) {
-	store, err := NewJobStore(cfg.DBPath)
+	store, err := NewBoltStore(cfg.DBPath)
 	if err != nil {
 		return nil, err
 	}

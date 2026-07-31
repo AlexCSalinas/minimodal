@@ -204,7 +204,12 @@ def make_executor(strategy: str, capacity: int) -> Executor:
     if strategy == "fork":
         from worker.warm_pool import ForkWarmPoolExecutor, WarmPoolConfig
         preimport = tuple(filter(None, os.environ.get("MINIMODAL_PREIMPORT", "").split(",")))
-        return ForkWarmPoolExecutor(WarmPoolConfig(size=capacity, preimport=preimport))
+        return ForkWarmPoolExecutor(WarmPoolConfig(
+            size=capacity,
+            preimport=preimport,
+            task_timeout_s=float(os.environ.get("MINIMODAL_TASK_TIMEOUT_S", "60")),
+            acquire_timeout_s=float(os.environ.get("MINIMODAL_ACQUIRE_TIMEOUT_S", "30")),
+        ))
     if strategy == "criu":
         raise NotImplementedError("CRIU is Linux-only and stubbed in v1 (see worker/snapshot.py)")
     raise ValueError(f"unknown MINIMODAL_COLD_START={strategy!r}")

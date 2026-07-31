@@ -126,6 +126,49 @@ func TestScheduler_Dispatch_WorkerRejectionRevertsToPending(t *testing.T) {
 	if got.WorkerID != "" {
 		t.Errorf("worker_id should be cleared on revert, got %q", got.WorkerID)
 	}
+	if got.RetryCount != 1 {
+		t.Errorf("a failed dispatch must count as a retry, got %d", got.RetryCount)
+	}
+}
+
+func TestScheduler_Dispatch_UnreachableWorkerFallsBackAndCountsRetry(t *testing.T) {
+	// A worker that dies between "mark RUNNING" and ExecuteTask returning is
+	// invisible to the reaper (the job never stays RUNNING on it), so this
+	// fallback is the only thing that re-dispatches the job.
+	s, pool, store := newTestScheduler(t)
+	addr, calls, stop := startFakeWorker(t, true, "")
+	defer stop()
+
+	dead, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	deadAddr := dead.Addr().String()
+	_ = dead.Close()
+
+	pool.Register("dead", deadAddr, 4)
+	pool.Register("alive", addr, 4)
+	// Least-loaded wins, so give the live worker some load to make the
+	// scheduler try the dead one first.
+	pool.RecordHeartbeat("alive", 1)
+	_ = store.PutJob(JobRecord{ID: "j", Status: StatusPending, FunctionBytes: []byte("p")})
+
+	if err := s.Dispatch(context.Background(), "j"); err != nil {
+		t.Fatalf("Dispatch: %v", err)
+	}
+	select {
+	case <-calls:
+	case <-time.After(2 * time.Second):
+		t.Fatal("live worker never received ExecuteTask")
+	}
+
+	got, _ := store.GetJob("j")
+	if got.Status != StatusRunning || got.WorkerID != "alive" {
+		t.Errorf("job should be RUNNING on the live worker, got %s on %q", got.Status, got.WorkerID)
+	}
+	if got.RetryCount != 1 {
+		t.Errorf("want RetryCount=1 after falling back off the dead worker, got %d", got.RetryCount)
+	}
 }
 
 func TestScheduler_GetOrDial_CachesChannel(t *testing.T) {

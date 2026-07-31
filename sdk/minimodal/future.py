@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import time
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from minimodal.pb import minimodal_pb2
 from minimodal.serialization import deserialize_result
@@ -17,7 +17,7 @@ class FutureError(RuntimeError):
 
 
 class Future:
-    def __init__(self, job_id: str, client: "OrchestratorClient") -> None:
+    def __init__(self, job_id: str, client: OrchestratorClient) -> None:
         self.job_id = job_id
         self._client = client
         self._cached_result: Any = None

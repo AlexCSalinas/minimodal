@@ -1,4 +1,4 @@
-.PHONY: help proto proto-go proto-py orchestrator worker-deps test test-integration ci run clean tools
+.PHONY: help proto proto-go proto-py orchestrator worker-deps test test-py lint-py test-integration ci run clean tools install-protoc
 
 # Project root.
 ROOT := $(shell pwd)
@@ -20,16 +20,26 @@ help:
 	@echo "  make worker-deps   pip install Python worker + SDK dependencies"
 	@echo "  make run           docker-compose up orchestrator + workers"
 	@echo "  make test          Run Go unit tests (with race detector)"
+	@echo "  make test-py       Run Python unit tests (tests/unit)"
+	@echo "  make lint-py       ruff-lint the Python sources"
 	@echo "  make test-integration  Run Python end-to-end tests (boots orchestrator + worker)"
-	@echo "  make ci            Run the same checks CI runs: gofmt, vet, test, build"
+	@echo "  make ci            Run the same checks CI runs: ruff, pytest, gofmt, vet, go test, build"
 	@echo "  make clean         Remove build artifacts and generated stubs"
 
 # One-time toolchain setup. Idempotent.
 tools:
-	@command -v protoc >/dev/null 2>&1 || (echo "Installing protoc..." && brew install protobuf)
+	@command -v protoc >/dev/null 2>&1 || $(MAKE) install-protoc
 	@go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
 	@go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest
-	$(PYTHON) -m pip install --upgrade grpcio grpcio-tools cloudpickle
+	$(PYTHON) -m pip install --upgrade grpcio grpcio-tools cloudpickle pytest ruff
+
+install-protoc:
+	@echo "Installing protoc..."
+	@case "$$(uname -s)" in \
+		Darwin) brew install protobuf ;; \
+		Linux)  sudo apt-get update && sudo apt-get install -y protobuf-compiler ;; \
+		*) echo "install protoc manually: https://grpc.io/docs/protoc-installation/"; exit 1 ;; \
+	esac
 
 proto: proto-go proto-py
 
@@ -72,6 +82,14 @@ worker-deps:
 test:
 	cd orchestrator && go test -race ./...
 
+# Python unit tests. Fast + hermetic: no orchestrator, no docker. Needs the
+# generated Python stubs (`make proto-py`) because the SDK imports them.
+test-py:
+	$(PYTHON) -m pytest
+
+lint-py:
+	$(PYTHON) -m ruff check .
+
 # Integration tests boot the actual orchestrator binary + a worker, so the
 # binary must already be built and proto stubs generated.
 test-integration: orchestrator
@@ -80,7 +98,7 @@ test-integration: orchestrator
 
 # Mirror what .github/workflows/ci.yml runs — useful for catching CI failures
 # before pushing.
-ci:
+ci: lint-py test-py
 	@unformatted=$$(cd orchestrator && gofmt -l .); \
 		if [ -n "$$unformatted" ]; then echo "gofmt needed:"; echo "$$unformatted"; exit 1; fi
 	cd orchestrator && go vet ./...

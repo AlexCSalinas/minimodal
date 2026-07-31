@@ -51,3 +51,28 @@ jobs:
       - name: go build
         working-directory: orchestrator
         run: go build -o orchestrator .
+
+  python:
+    name: python lint + test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Python deps
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r worker/requirements.txt pytest ruff
+          python -m pip install -e sdk
+
+      - name: Generate Python proto stubs
+        run: make proto-py
+
+      - name: ruff
+        run: ruff check .
+
+      - name: pytest
+        run: pytest

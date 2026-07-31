@@ -137,7 +137,6 @@ def test_worker_death_redispatch() -> None:
         print(f"  job picked up by worker={victim_id}")
 
         victim_proc = w1 if victim_id == "victim" else w2
-        survivor_proc = w2 if victim_id == "victim" else w1
         survivor_id = "survivor" if victim_id == "victim" else "victim"
         print(f"  SIGKILL worker={victim_id} (pid={victim_proc.pid})")
         victim_proc.kill()
@@ -211,7 +210,7 @@ def test_orchestrator_restart_replays_wal() -> None:
 
         with open("/tmp/orch-fault-2b.log") as fh:
             log = fh.read()
-        assert "WAL replay: recovered 1 unfinished job(s)" in log, f"WAL replay log line missing\n{log}"
+        assert 'msg="WAL replay completed" recovered=1' in log, f"WAL replay log line missing\n{log}"
         print("  PASS (WAL replay confirmed in orchestrator log)")
     finally:
         _cleanup(w, orch)

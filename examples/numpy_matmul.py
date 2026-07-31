@@ -4,7 +4,6 @@ the already-imported numpy and skips that cost entirely.
 """
 
 import numpy as np
-
 from minimodal import App
 
 app = App("numpy-matmul")

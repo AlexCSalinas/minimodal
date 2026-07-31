@@ -7,17 +7,18 @@ area so examples can import without crashing.
 from __future__ import annotations
 
 import os
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 from minimodal.client import OrchestratorClient
 from minimodal.future import Future
-from minimodal.serialization import serialize_callable, serialize_args
+from minimodal.serialization import serialize_args, serialize_callable
 
 
 class Func:
     """Wraps a user function with .remote() / .local() entry points."""
 
-    def __init__(self, fn: Callable[..., Any], app: "App") -> None:
+    def __init__(self, fn: Callable[..., Any], app: App) -> None:
         self._fn = fn
         self._app = app
         self.__name__ = getattr(fn, "__name__", "anonymous")

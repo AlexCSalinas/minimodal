@@ -49,7 +49,7 @@ Three tiers, one box. A call flows: **SDK → orchestrator → worker → back**
 | Fault tolerance | At-least-once delivery, WAL replay across orchestrator crashes, heartbeat-based worker reaping, CAS state transitions | `orchestrator/job_store.go` |
 | Idempotency | Caller-supplied keys → effective exactly-once, result bytes persisted across restarts | `orchestrator/server.go` |
 | Observability | `/metrics` JSON, dashboard with live p50/p95/p99 cold-start chart | `dashboard/`, `orchestrator/metrics.go` |
-| Tests | SIGKILL mid-execution + reaper recovery, restart with in-flight job, idempotency across restart | `tests/` |
+| Tests | Go unit tests; Python unit tests for the SDK + every cold-start strategy; integration tests covering SIGKILL mid-execution + reaper recovery, restart with in-flight job, idempotency across restart | `orchestrator/*_test.go`, `tests/unit/`, `tests/` |
 
 ## Quickstart
 
@@ -73,6 +73,11 @@ print(greet.remote("alex"))   # → "hi alex"
 
 More examples in `examples/` (parallel map, numpy matmul).
 
+```bash
+make ci                # ruff + pytest + gofmt + go vet + go test -race + build
+make test-integration  # boots a real orchestrator + worker
+```
+
 ## Why fork isn't actually enough
 
 Copy-on-write fork is fast but breaks on three real-world things:
@@ -80,6 +85,12 @@ Copy-on-write fork is fast but breaks on three real-world things:
 1. **CUDA contexts can't be forked.** Kernel-side driver handles aren't inheritable. PyTorch and TensorFlow both die.
 2. **File descriptors leak.** The parent's sockets and DB connections corrupt the child. This worker forks *before* opening anything.
 3. **Multithreaded parents deadlock.** Only the calling thread is copied; held mutexes stay locked forever. `WarmPool.start()` must precede the gRPC server.
+
+Which also means the worker can't refill its own pool: by the time a warm child
+dies, the worker is multithreaded and can no longer fork safely. So `start()`
+forks one single-threaded *spawner* process that holds the preimported pages and
+forks every warm child on demand — a crashed or wedged child is replaced with an
+equally warm one instead of shrinking the pool toward zero.
 
 The real Modal trick is **CRIU + `userfaultfd`**: snapshot a warm process to disk, restore it via lazy page faults — restoring a 500 MB Python process takes ~10–15 ms wall time and amortizes the rest of the page faults across the first request. v1 stubs this in `worker/snapshot.py`; nothing in this stack runs on macOS yet.
 

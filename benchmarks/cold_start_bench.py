@@ -80,7 +80,7 @@ def main() -> int:
     wall_clock: list[int] = []
 
     t0 = time.monotonic()
-    for i in range(n):
+    for _ in range(n):
         invoke_start = time.monotonic()
         f = fn.spawn()
         result = f.get()

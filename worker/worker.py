@@ -32,8 +32,8 @@ from concurrent import futures
 
 import grpc
 
-from worker.pb import minimodal_pb2, minimodal_pb2_grpc
 from worker.executor import Executor, make_executor
+from worker.pb import minimodal_pb2, minimodal_pb2_grpc
 
 log = logging.getLogger("worker")
 logging.basicConfig(

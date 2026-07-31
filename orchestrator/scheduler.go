@@ -137,13 +137,17 @@ func (s *Scheduler) Dispatch(ctx context.Context, jobID string) error {
 		}
 
 		// Worker NACK'd or unreachable — revert to PENDING for the next attempt
-		// only if the job hasn't gone terminal in the meantime.
+		// only if the job hasn't gone terminal in the meantime. This counts as
+		// a retry: a worker that dies between "mark RUNNING" and ExecuteTask
+		// returning is the same failure the reaper handles a moment later, and
+		// RetryCount is the only record a client has of it.
 		_, _ = s.jobStore.Transition(jobID, func(r *JobRecord) error {
 			if r.Status == StatusDone || r.Status == StatusFailed {
 				return ErrSkipTransition
 			}
 			r.Status = StatusPending
 			r.WorkerID = ""
+			r.RetryCount++
 			return nil
 		})
 	}

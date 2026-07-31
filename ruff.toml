@@ -1,0 +1,11 @@
+line-length = 100
+target-version = "py310"
+
+exclude = ["sdk/minimodal/pb", "worker/pb"]
+
+[lint]
+select = ["E", "F", "W", "I", "UP", "B"]
+ignore = [
+    "E501",  # long lines are mostly prose in module docstrings
+    "B008",
+]

@@ -48,6 +48,7 @@ Three tiers, one box. A call flows: **SDK → orchestrator → worker → back**
 | Cold-start | inproc, copy-on-write fork from warm pool, naive subprocess, stubbed CRIU | `worker/` |
 | Fault tolerance | At-least-once delivery, WAL replay across orchestrator crashes, heartbeat-based worker reaping, CAS state transitions | `orchestrator/job_store.go` |
 | Idempotency | Caller-supplied keys → effective exactly-once, result bytes persisted across restarts | `orchestrator/server.go` |
+| Autoscaling | demand-driven worker launch (queue depth / saturation), idle scale-down, min/max bounds | `orchestrator/autoscaler.go` |
 | Observability | `/metrics` JSON, dashboard with live p50/p95/p99 cold-start chart | `dashboard/`, `orchestrator/metrics.go` |
 | Tests | Go unit tests; Python unit tests for the SDK + every cold-start strategy; integration tests covering SIGKILL mid-execution + reaper recovery, restart with in-flight job, idempotency across restart | `orchestrator/*_test.go`, `tests/unit/`, `tests/` |
 
@@ -77,6 +78,36 @@ More examples in `examples/` (parallel map, numpy matmul).
 make ci                # ruff + pytest + gofmt + go vet + go test -race + build
 make test-integration  # boots a real orchestrator + worker
 ```
+
+## Autoscaling
+
+By default the worker pool is static (whatever you point at the orchestrator).
+Set `MINIMODAL_AUTOSCALE=1` and the orchestrator manages its own fleet: it
+execs worker processes on demand and reaps them when idle.
+
+- **Scale-up** fires when jobs are waiting with nowhere to go — nonzero queue
+  depth (including a job stuck in the dispatcher's retry loop), or every alive
+  worker at its declared capacity. One launch per policy tick, with a cooldown
+  so a burst doesn't over-spawn while workers are still booting.
+- **Scale-down** reclaims one worker at a time once it has sat idle past
+  `MINIMODAL_AUTOSCALE_IDLE_TIMEOUT` with an empty queue. Only workers the
+  autoscaler launched are ever stopped — externally started workers (e.g.
+  docker-compose replicas) count toward capacity but are never touched, so
+  a static base pool composes with burst scaling on top.
+- **Scale-to-zero** is the default (`MINIMODAL_AUTOSCALE_MIN=0`): an idle
+  deployment runs no workers at all; the first invocation pays one worker
+  boot and everything after rides the warm pool.
+
+```bash
+MINIMODAL_AUTOSCALE=1 \
+MINIMODAL_WORKER_CMD=".venv/bin/python -m worker.worker" \
+go run ./orchestrator
+```
+
+Knobs (env): `MINIMODAL_AUTOSCALE_MIN` / `_MAX` (0 / 4),
+`_IDLE_TIMEOUT` (30s), `_COOLDOWN` (3s), `_REGISTER_TIMEOUT` (15s),
+`_TICK` (500ms), plus `MINIMODAL_WORKER_CMD`, `MINIMODAL_WORKER_DIR`,
+`MINIMODAL_WORKER_BASE_PORT` for how workers get exec'd.
 
 ## Why fork isn't actually enough
 

@@ -49,6 +49,12 @@ type Server struct {
 	// exit. The job is already persisted to BoltDB; recovery on the next
 	// startup will pick it up via RecoverUnfinishedJobs.
 	shuttingDown atomic.Bool
+
+	// Jobs the drainer has pulled off pendingQueue but cannot place because
+	// no worker will take them (attemptDispatch is in its backoff loop).
+	// Counted separately because such a job is invisible to len(pendingQueue)
+	// — and it is exactly the demand signal the autoscaler needs.
+	stalledDispatches atomic.Int64
 }
 
 const (
@@ -142,6 +148,12 @@ func (s *Server) attemptDispatch(ctx context.Context, jobID string) {
 	if maxAttempts < 1 {
 		maxAttempts = 30
 	}
+	stalled := false
+	defer func() {
+		if stalled {
+			s.stalledDispatches.Add(-1)
+		}
+	}()
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		err := s.scheduler.Dispatch(ctx, jobID)
 		if err == nil {
@@ -151,6 +163,10 @@ func (s *Server) attemptDispatch(ctx context.Context, jobID string) {
 			return
 		}
 		if errors.Is(err, ErrNoWorkersAvailable) || errors.Is(err, ErrAllWorkersExhausted) {
+			if !stalled {
+				stalled = true
+				s.stalledDispatches.Add(1)
+			}
 			// Workers are absent or busy — wait and retry, up to maxAttempts.
 			if attempt == maxAttempts {
 				break
@@ -206,6 +222,14 @@ func (s *Server) enqueue(jobID string) {
 		// Queue full — block. Better to apply backpressure than drop jobs.
 		s.pendingQueue <- jobID
 	}
+}
+
+// QueueDepth reports how many jobs are waiting for a worker: everything
+// still in the pending queue, plus any job the drainer has pulled off but
+// cannot place (attemptDispatch stuck in its backoff loop). This is the
+// Autoscaler's scale-up signal.
+func (s *Server) QueueDepth() int {
+	return len(s.pendingQueue) + int(s.stalledDispatches.Load())
 }
 
 // BeginShutdown flags the server as draining: subsequent enqueue() calls

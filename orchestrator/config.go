@@ -31,6 +31,31 @@ type Config struct {
 	// InvokeFunction call. Prevents a buggy or malicious client from
 	// allocating arbitrary memory on the orchestrator.
 	MaxPayloadBytes int
+
+	// --- Autoscaler (opt-in via MINIMODAL_AUTOSCALE=1) ---
+	// When enabled, the orchestrator launches and reaps local worker
+	// processes on demand instead of relying solely on a static pool.
+	AutoscaleEnabled bool
+	// Bounds on the number of autoscaler-managed + external workers.
+	AutoscaleMin int
+	AutoscaleMax int
+	// Queued jobs at/above this trigger a scale-up.
+	AutoscaleQueueThreshold int
+	// A managed worker idle this long (with an empty queue) is stopped.
+	AutoscaleIdleTimeout time.Duration
+	// Minimum gap between demand-driven launches.
+	AutoscaleCooldown time.Duration
+	// A launched worker must register within this or its slot is reclaimed.
+	AutoscaleRegisterTimeout time.Duration
+	// Policy evaluation interval.
+	AutoscaleTick time.Duration
+	// Command ProcessLauncher execs to start one worker (space-separated).
+	WorkerCmd string
+	// Directory the worker command runs in; must be the repo root so
+	// `-m worker.worker` resolves.
+	WorkerDir string
+	// First worker gRPC port; each concurrent worker leases the next free one.
+	WorkerBasePort int
 }
 
 func LoadConfig() Config {
@@ -44,12 +69,33 @@ func LoadConfig() Config {
 		MaxDispatchAttempts: envInt("MINIMODAL_MAX_DISPATCH_ATTEMPTS", 30),
 		ExecuteTaskTimeout:  envDuration("MINIMODAL_EXECUTE_TASK_TIMEOUT", 5*time.Second),
 		MaxPayloadBytes:     envInt("MINIMODAL_MAX_PAYLOAD_BYTES", 16*1024*1024), // 16 MiB
+
+		AutoscaleEnabled:         envBool("MINIMODAL_AUTOSCALE", false),
+		AutoscaleMin:             envInt("MINIMODAL_AUTOSCALE_MIN", 0),
+		AutoscaleMax:             envInt("MINIMODAL_AUTOSCALE_MAX", 4),
+		AutoscaleQueueThreshold:  envInt("MINIMODAL_AUTOSCALE_QUEUE_THRESHOLD", 1),
+		AutoscaleIdleTimeout:     envDuration("MINIMODAL_AUTOSCALE_IDLE_TIMEOUT", 30*time.Second),
+		AutoscaleCooldown:        envDuration("MINIMODAL_AUTOSCALE_COOLDOWN", 3*time.Second),
+		AutoscaleRegisterTimeout: envDuration("MINIMODAL_AUTOSCALE_REGISTER_TIMEOUT", 15*time.Second),
+		AutoscaleTick:            envDuration("MINIMODAL_AUTOSCALE_TICK", 500*time.Millisecond),
+		WorkerCmd:                envStr("MINIMODAL_WORKER_CMD", ".venv/bin/python -m worker.worker"),
+		WorkerDir:                envStr("MINIMODAL_WORKER_DIR", "."),
+		WorkerBasePort:           envInt("MINIMODAL_WORKER_BASE_PORT", 50100),
 	}
 }
 
 func envStr(key, def string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
+	}
+	return def
+}
+
+func envBool(key string, def bool) bool {
+	if v := os.Getenv(key); v != "" {
+		if b, err := strconv.ParseBool(v); err == nil {
+			return b
+		}
 	}
 	return def
 }

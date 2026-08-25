@@ -180,6 +180,12 @@ func (s *Scheduler) sendExecuteTask(ctx context.Context, workerID, address strin
 func (s *Scheduler) getOrDial(workerID, address string) (*grpc.ClientConn, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.channels == nil {
+		// Close() ran while a dispatch was in flight (shutdown, or test
+		// teardown). Fail the dial instead of panicking on the nil map —
+		// the caller treats it like an unreachable worker.
+		return nil, errors.New("scheduler is closed")
+	}
 	if conn, ok := s.channels[workerID]; ok {
 		return conn, nil
 	}

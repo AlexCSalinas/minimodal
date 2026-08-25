@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -69,6 +70,38 @@ func main() {
 	go srv.workerPool.RunFaultDetector(bgCtx)
 	go srv.RunPendingQueueLoop(bgCtx)
 
+	// Autoscaler (opt-in): the orchestrator launches and reaps local worker
+	// processes on demand. Composes with externally started workers — they
+	// count toward capacity but are never stopped.
+	var autoscaler *Autoscaler
+	if cfg.AutoscaleEnabled {
+		argv := strings.Fields(cfg.WorkerCmd)
+		if len(argv) == 0 {
+			slog.Error("MINIMODAL_AUTOSCALE=1 but MINIMODAL_WORKER_CMD is empty")
+			os.Exit(1)
+		}
+		launcher := NewProcessLauncher(
+			argv,
+			cfg.WorkerDir,
+			"127.0.0.1:"+strconv.Itoa(cfg.GRPCPort),
+			cfg.WorkerBasePort,
+		)
+		autoscaler = NewAutoscaler(AutoscalerConfig{
+			Min:             cfg.AutoscaleMin,
+			Max:             cfg.AutoscaleMax,
+			QueueThreshold:  cfg.AutoscaleQueueThreshold,
+			IdleTimeout:     cfg.AutoscaleIdleTimeout,
+			Cooldown:        cfg.AutoscaleCooldown,
+			RegisterTimeout: cfg.AutoscaleRegisterTimeout,
+			Tick:            cfg.AutoscaleTick,
+		}, srv.workerPool, srv.QueueDepth, launcher)
+		go autoscaler.Run(bgCtx)
+		slog.Info("autoscaler enabled",
+			"min", cfg.AutoscaleMin,
+			"max", cfg.AutoscaleMax,
+			"worker_cmd", cfg.WorkerCmd)
+	}
+
 	// HTTP /metrics + dashboard server runs alongside the gRPC server on a
 	// different port. Failures here don't kill the orchestrator.
 	httpServer := NewHTTPServer(srv, cfg.HTTPPort)
@@ -118,4 +151,7 @@ func main() {
 		grpcServer.Stop()
 	}
 	cancelBg()
+	if autoscaler != nil {
+		autoscaler.Shutdown()
+	}
 }

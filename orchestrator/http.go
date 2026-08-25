@@ -26,6 +26,11 @@ func NewHTTPServer(app *Server, port int) *HTTPServer {
 	h.mux.HandleFunc("/metrics", h.handleMetrics)
 	h.mux.HandleFunc("/healthz", h.handleHealthz)
 
+	if app.RaftStore() != nil {
+		h.mux.HandleFunc("/raft/join", h.handleRaftJoin)
+		h.mux.HandleFunc("/raft/status", h.handleRaftStatus)
+	}
+
 	// Opt-in pprof endpoints for production debugging. Off by default because
 	// /debug/pprof/* exposes goroutine stacks + heap profile + CPU traces —
 	// useful for an operator, but not safe to leave open on a public-facing
@@ -103,6 +108,41 @@ func (h *HTTPServer) handleHealthz(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_, _ = w.Write([]byte("ok\n"))
+}
+
+// handleRaftJoin adds a new node to the cluster. Leader only — a follower
+// answers 409 with the leader's location so the joiner (or operator) can
+// retry against it.
+//
+//	POST /raft/join {"id": "node-2", "addr": "10.0.0.2:7000"}
+func (h *HTTPServer) handleRaftJoin(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST only", http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		ID   string `json:"id"`
+		Addr string `json:"addr"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.ID == "" || req.Addr == "" {
+		http.Error(w, `body must be {"id": ..., "addr": ...}`, http.StatusBadRequest)
+		return
+	}
+	rs := h.app.RaftStore()
+	if err := rs.Join(req.ID, req.Addr); err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusConflict)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+	slog.Info("raft: node joined", "id", req.ID, "addr", req.Addr)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (h *HTTPServer) handleRaftStatus(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(h.app.RaftStore().Status(h.app.cfg.RaftID))
 }
 
 // resolveDashboardPath looks for the dashboard directory in (1) the

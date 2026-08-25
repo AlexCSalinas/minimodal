@@ -56,6 +56,23 @@ type Config struct {
 	WorkerDir string
 	// First worker gRPC port; each concurrent worker leases the next free one.
 	WorkerBasePort int
+
+	// --- Raft (opt-in via MINIMODAL_RAFT=1) ---
+	// When enabled, the job store is a Raft-replicated state machine: every
+	// write commits on a majority of nodes, so job state survives the loss
+	// of any minority — including the leader. DBPath is ignored (each node's
+	// FSM state lives under RaftDir).
+	RaftEnabled bool
+	// Stable, unique node ID within the cluster.
+	RaftID string
+	// host:port for raft's inter-node TCP transport.
+	RaftBind string
+	// Data directory: FSM BoltDB, raft log, snapshots.
+	RaftDir string
+	// Base HTTP URL of any existing cluster node (e.g. http://10.0.0.1:8080).
+	// Empty = bootstrap self as a new single-node cluster; set = start blank
+	// and ask that node's leader to add us via POST /raft/join.
+	RaftJoin string
 }
 
 func LoadConfig() Config {
@@ -81,6 +98,12 @@ func LoadConfig() Config {
 		WorkerCmd:                envStr("MINIMODAL_WORKER_CMD", ".venv/bin/python -m worker.worker"),
 		WorkerDir:                envStr("MINIMODAL_WORKER_DIR", "."),
 		WorkerBasePort:           envInt("MINIMODAL_WORKER_BASE_PORT", 50100),
+
+		RaftEnabled: envBool("MINIMODAL_RAFT", false),
+		RaftID:      envStr("MINIMODAL_RAFT_ID", "node-1"),
+		RaftBind:    envStr("MINIMODAL_RAFT_BIND", "127.0.0.1:7000"),
+		RaftDir:     envStr("MINIMODAL_RAFT_DIR", "raft-data"),
+		RaftJoin:    envStr("MINIMODAL_RAFT_JOIN", ""),
 	}
 }
 

@@ -47,11 +47,20 @@ class ExecutionResult:
 
 
 class Executor(Protocol):
-    """Interface every cold-start strategy implements."""
+    """Interface every cold-start strategy implements.
+
+    output_sink, when given, receives the user function's raw stdout/stderr
+    writes as they happen — sink(text, is_stderr) — for live log streaming.
+    Strategies that can only capture output at completion ignore the sink and
+    return the buffered text in ExecutionResult.stdout/.stderr instead; the
+    worker ships those as tail lines with the final report.
+    """
 
     name: str
 
-    def execute(self, function_bytes: bytes, args_bytes: bytes) -> ExecutionResult: ...
+    def execute(
+        self, function_bytes: bytes, args_bytes: bytes, output_sink=None
+    ) -> ExecutionResult: ...
 
     def shutdown(self) -> None: ...
 
@@ -66,7 +75,11 @@ class Executor(Protocol):
 class InprocExecutor:
     name: str = "inproc"
 
-    def execute(self, function_bytes: bytes, args_bytes: bytes) -> ExecutionResult:
+    def execute(
+        self, function_bytes: bytes, args_bytes: bytes, output_sink=None
+    ) -> ExecutionResult:
+        if output_sink is not None:
+            return self._execute_streaming(function_bytes, args_bytes, output_sink)
         stdout_buf, stderr_buf = io.StringIO(), io.StringIO()
         cold_start = time.monotonic()
         try:
@@ -94,6 +107,45 @@ class InprocExecutor:
                 stderr=stderr_buf.getvalue(),
             )
 
+    def _execute_streaming(
+        self, function_bytes: bytes, args_bytes: bytes, output_sink
+    ) -> ExecutionResult:
+        # Thread-local routing instead of redirect_stdout: the redirect
+        # approach swaps the process-global stream, so two concurrent tasks
+        # would capture each other's prints. The router tees each thread's
+        # writes to its own sink, live. Output goes to the sink as it
+        # happens, so ExecutionResult.stdout/.stderr stay empty — nothing is
+        # double-delivered as tail lines.
+        from worker.logstream import install_routers
+
+        out_router, err_router = install_routers()
+        cold_start = time.monotonic()
+        try:
+            fn = deserialize_callable(function_bytes)
+            args, kwargs = deserialize_args(args_bytes)
+            exec_start = time.monotonic()
+            out_router.set_sink(output_sink)
+            err_router.set_sink(output_sink)
+            try:
+                result = fn(*args, **kwargs)
+            finally:
+                out_router.clear_sink()
+                err_router.clear_sink()
+            exec_end = time.monotonic()
+            return ExecutionResult(
+                success=True,
+                result_bytes=serialize_result(result),
+                cold_start_ms=int((exec_start - cold_start) * 1000),
+                execution_ms=int((exec_end - exec_start) * 1000),
+            )
+        except Exception:
+            return ExecutionResult(
+                success=False,
+                error=traceback.format_exc(),
+                cold_start_ms=int((time.monotonic() - cold_start) * 1000),
+                execution_ms=0,
+            )
+
     def shutdown(self) -> None:
         pass
 
@@ -112,7 +164,11 @@ class NaiveSubprocessExecutor:
     python_path: str = field(default_factory=lambda: sys.executable)
     name: str = "naive"
 
-    def execute(self, function_bytes: bytes, args_bytes: bytes) -> ExecutionResult:
+    def execute(
+        self, function_bytes: bytes, args_bytes: bytes, output_sink=None
+    ) -> ExecutionResult:
+        # output_sink unused: the child buffers user output and returns it in
+        # the envelope, so it reaches the client as tail lines at completion.
         wall_start = time.monotonic()
         env = os.environ.copy()
         # Ensure the subprocess can import worker.subprocess_runner + minimodal.
@@ -167,20 +223,29 @@ class NaiveSubprocessExecutor:
         execution_ms = int(envelope.get("execution_ms", 0))
         cold_start_ms = max(0, wall_ms - execution_ms)
 
+        # User-function output is captured inside the child (see
+        # subprocess_runner) and travels back in the envelope — it must NOT
+        # go to the child's real stdout, which carries the framed response.
+        # Only the envelope's capture counts as user output: the process's
+        # raw stderr carries runtime noise (e.g. gRPC fork-handler
+        # diagnostics inherited from the worker) and is used for error
+        # diagnostics only.
         if envelope.get("ok"):
             return ExecutionResult(
                 success=True,
                 result_bytes=envelope["result_bytes"],
                 cold_start_ms=cold_start_ms,
                 execution_ms=execution_ms,
-                stderr=stderr_data.decode(errors="replace"),
+                stdout=envelope.get("stdout", ""),
+                stderr=envelope.get("stderr", ""),
             )
         return ExecutionResult(
             success=False,
             error=envelope.get("error", "unknown error"),
             cold_start_ms=cold_start_ms,
             execution_ms=execution_ms,
-            stderr=stderr_data.decode(errors="replace"),
+            stdout=envelope.get("stdout", ""),
+            stderr=envelope.get("stderr", ""),
         )
 
     def shutdown(self) -> None:

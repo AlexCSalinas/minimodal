@@ -43,6 +43,10 @@ type Server struct {
 	// orchestrator restart).
 	results *lruResults
 
+	// Live log fan-out: workers stream user-function output in via
+	// StreamTaskLogs; SDK clients stream it out via WatchJob.
+	logHub *LogHub
+
 	// Set to true once shutdown begins. enqueue() checks this so that an
 	// InvokeFunction RPC that lands during graceful shutdown doesn't block
 	// forever trying to send to a pendingQueue whose drainer is about to
@@ -78,6 +82,7 @@ func NewServer(cfg Config) (*Server, error) {
 		metrics:      NewMetrics(),
 		pendingQueue: make(chan string, pendingQueueSize),
 		results:      newLRUResults(resultsCacheSize),
+		logHub:       NewLogHub(),
 	}
 	// WorkerPool calls back into Server when workers die.
 	pool.SetReaper(srv)
@@ -191,6 +196,7 @@ func (s *Server) attemptDispatch(ctx context.Context, jobID string) {
 			r.Error = "dispatch failed: " + err.Error()
 			return nil
 		})
+		s.notifyTerminal(jobID)
 		return
 	}
 
@@ -204,6 +210,7 @@ func (s *Server) attemptDispatch(ctx context.Context, jobID string) {
 		r.Error = fmt.Sprintf("dispatch failed: no worker accepted after %d attempts", maxAttempts)
 		return nil
 	})
+	s.notifyTerminal(jobID)
 	s.metrics.RecordFailed()
 }
 
@@ -291,6 +298,7 @@ func (s *Server) ReassignJobsOf(workerID string) {
 			s.enqueue(j.ID)
 		} else if markedFailed {
 			slog.Warn("reaper: max retries exceeded; marked FAILED", "job", j.ID)
+			s.notifyTerminal(j.ID)
 		}
 	}
 }
@@ -339,6 +347,11 @@ func (s *Server) ReportTaskResult(ctx context.Context, req *pb.ReportTaskResultR
 		executionMs: req.ExecutionMs,
 	})
 
+	// Output captured only at completion (naive subprocess buffers, anything
+	// the worker didn't stream live). Appended before the terminal transition
+	// so watchers always see these lines before the result event.
+	s.logHub.Append(req.JobId, req.TailLines)
+
 	_, err := s.jobStore.Transition(req.JobId, func(rec *JobRecord) error {
 		if rec.Status == StatusDone || rec.Status == StatusFailed {
 			return ErrSkipTransition
@@ -364,6 +377,7 @@ func (s *Server) ReportTaskResult(ctx context.Context, req *pb.ReportTaskResultR
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "transition job: %v", err)
 	}
+	s.notifyTerminal(req.JobId)
 
 	s.metrics.RecordColdStart(req.ColdStartMs)
 	if req.Success {

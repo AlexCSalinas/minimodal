@@ -366,7 +366,13 @@ class ForkWarmPoolExecutor:
         self._started = False
 
     # -- Executor protocol --------------------------------------------------
-    def execute(self, function_bytes: bytes, args_bytes: bytes) -> ExecutionResult:
+    def execute(
+        self, function_bytes: bytes, args_bytes: bytes, output_sink=None
+    ) -> ExecutionResult:
+        # output_sink unused: warm children run in their own processes with
+        # inherited stdio, so their prints land in the worker's own log
+        # rather than being captured. Live capture for fork is future work
+        # (pipe the child's stdio through the parent).
         if not self._started:
             raise RuntimeError("WarmPool not started")
 

@@ -11,10 +11,12 @@ warm-pool optimization buys us.
 
 from __future__ import annotations
 
+import io
 import struct
 import sys
 import time
 import traceback
+from contextlib import redirect_stderr, redirect_stdout
 
 
 def _read_exact(stream, n: int) -> bytes:
@@ -65,14 +67,21 @@ def main() -> int:
         })
         return 0
 
+    # Capture user output into the envelope. Critical: the child's real
+    # stdout carries the framed response, so a user function that print()s
+    # directly to it would corrupt the length prefix the parent reads.
+    out_buf, err_buf = io.StringIO(), io.StringIO()
     t0 = time.monotonic()
     try:
-        result = fn(*args, **kwargs)
+        with redirect_stdout(out_buf), redirect_stderr(err_buf):
+            result = fn(*args, **kwargs)
         execution_ms = int((time.monotonic() - t0) * 1000)
         _write_envelope(sys.stdout.buffer, {
             "ok": True,
             "result_bytes": cloudpickle.dumps(result),
             "execution_ms": execution_ms,
+            "stdout": out_buf.getvalue(),
+            "stderr": err_buf.getvalue(),
         })
     except Exception:
         execution_ms = int((time.monotonic() - t0) * 1000)
@@ -80,6 +89,8 @@ def main() -> int:
             "ok": False,
             "error": traceback.format_exc(),
             "execution_ms": execution_ms,
+            "stdout": out_buf.getvalue(),
+            "stderr": err_buf.getvalue(),
         })
     return 0
 

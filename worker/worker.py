@@ -33,6 +33,7 @@ from concurrent import futures
 import grpc
 
 from worker.executor import Executor, make_executor
+from worker.logstream import TaskLogStreamer
 from worker.pb import minimodal_pb2, minimodal_pb2_grpc
 
 log = logging.getLogger("worker")
@@ -80,8 +81,16 @@ class WorkerServicer(minimodal_pb2_grpc.WorkerServicer):
         return minimodal_pb2.ExecuteTaskResponse(accepted=True)
 
     def _run_task(self, request) -> None:
+        # Live log streaming: executors that support it (inproc) push the
+        # user function's output through streamer.sink as it happens; the
+        # rest return buffered output on the result, shipped as tail lines.
+        streamer = TaskLogStreamer(self._orch, request.job_id, self.worker_id)
         try:
-            result = self._executor.execute(request.function_bytes, request.args_bytes)
+            result = self._executor.execute(
+                request.function_bytes, request.args_bytes,
+                output_sink=streamer.sink,
+            )
+            streamer.close()
             self._report(
                 job_id=request.job_id,
                 success=result.success,
@@ -89,9 +98,11 @@ class WorkerServicer(minimodal_pb2_grpc.WorkerServicer):
                 error=result.error,
                 cold_start_ms=result.cold_start_ms,
                 execution_ms=result.execution_ms,
+                tail_lines=_tail_lines(result),
             )
         except Exception as e:
             log.exception("unexpected error in _run_task job=%s", request.job_id)
+            streamer.close()
             self._report(
                 job_id=request.job_id, success=False, result_bytes=b"",
                 error=f"worker internal error: {e}", cold_start_ms=0, execution_ms=0,
@@ -107,6 +118,16 @@ class WorkerServicer(minimodal_pb2_grpc.WorkerServicer):
             )
         except grpc.RpcError as e:
             log.error("ReportTaskResult failed job=%s: %s", kwargs.get("job_id"), e.code())
+
+
+def _tail_lines(result) -> list[minimodal_pb2.LogLine]:
+    """Convert completion-time captured output into LogLine tail entries."""
+    ts = int(time.time() * 1000)
+    return [
+        minimodal_pb2.LogLine(line=line, is_stderr=is_err, ts_unix_ms=ts)
+        for text, is_err in ((result.stdout, False), (result.stderr, True))
+        for line in text.splitlines()
+    ]
 
 
 def resolve_advertise_address(port: int) -> str:

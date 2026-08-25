@@ -30,6 +30,18 @@ service Orchestrator {
   // Worker reports the terminal result of a task back to the orchestrator.
   // Called from worker after ExecuteTask finishes (success or failure).
   rpc ReportTaskResult(ReportTaskResultRequest) returns (ReportTaskResultResponse);
+
+  // SDK subscribes to a job's live event stream: status changes, log lines
+  // captured from the user function, and finally the terminal result. This is
+  // the push-based replacement for GetJobStatus polling (which remains for
+  // one-shot re-fetch, e.g. idempotent retries after the job completed).
+  // The stream ends after the result event is sent.
+  rpc WatchJob(WatchJobRequest) returns (stream JobEvent);
+
+  // Worker streams user-function output for a running job as it is produced.
+  // Logs are live-only: buffered in memory while the job runs, fanned out to
+  // watchers, and discarded once the job is terminal and unwatched.
+  rpc StreamTaskLogs(stream TaskLogChunk) returns (StreamTaskLogsResponse);
 }
 
 // =============================================================================
@@ -140,6 +152,58 @@ message ReportTaskResultRequest {
   string error = 5;
   int64 cold_start_ms = 6;
   int64 execution_ms = 7;
+  // Output captured only at completion (executors without live streaming:
+  // naive subprocess buffers, fork children). Delivered to watchers just
+  // before the result event so no captured output is ever dropped.
+  repeated LogLine tail_lines = 8;
+}
+
+// =============================================================================
+// Streaming: logs + job events
+// =============================================================================
+message LogLine {
+  // One line of user-function output, without the trailing newline.
+  string line = 1;
+  // false = stdout, true = stderr.
+  bool is_stderr = 2;
+  // Worker-side capture timestamp (unix ms); 0 if unknown.
+  int64 ts_unix_ms = 3;
+}
+
+message WatchJobRequest {
+  string job_id = 1;
+}
+
+message JobEvent {
+  string job_id = 1;
+  oneof event {
+    // Lifecycle transition observed (PENDING on subscribe, then RUNNING...).
+    JobStatus status = 2;
+    // One line of live user-function output.
+    LogLine log = 3;
+    // Terminal event: DONE or FAILED. Always the last event on the stream.
+    JobResult result = 4;
+  }
+}
+
+message JobResult {
+  JobStatus status = 1;   // DONE or FAILED
+  bytes result_bytes = 2;
+  string error = 3;
+  int64 cold_start_ms = 4;
+  int64 total_duration_ms = 5;
+  int32 retry_count = 6;
+  string worker_id = 7;
+}
+
+message TaskLogChunk {
+  string job_id = 1;
+  string worker_id = 2;
+  repeated LogLine lines = 3;
+}
+
+message StreamTaskLogsResponse {
+  bool acknowledged = 1;
 }
 
 message ReportTaskResultResponse {

@@ -32,6 +32,17 @@ class FakeClient:
             result_bytes=serialize_result(self._result),
         )
 
+    def watch_job(self, job_id, timeout_s=None):
+        from minimodal.pb import minimodal_pb2
+
+        yield minimodal_pb2.JobEvent(
+            job_id=job_id,
+            result=minimodal_pb2.JobResult(
+                status=minimodal_pb2.JOB_STATUS_DONE,
+                result_bytes=serialize_result(self._result),
+            ),
+        )
+
 
 @pytest.fixture
 def app():

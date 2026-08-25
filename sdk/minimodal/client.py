@@ -34,5 +34,16 @@ class OrchestratorClient:
             minimodal_pb2.GetJobStatusRequest(job_id=job_id)
         )
 
+    def watch_job(self, job_id: str, timeout_s: float | None = None):
+        """Server-streaming subscription to a job's lifecycle.
+
+        Yields JobEvent messages — status transitions, live log lines, and
+        finally the terminal result, after which the stream ends. timeout_s
+        is a gRPC deadline on the whole stream.
+        """
+        return self._stub.WatchJob(
+            minimodal_pb2.WatchJobRequest(job_id=job_id), timeout=timeout_s
+        )
+
     def close(self) -> None:
         self._channel.close()

@@ -49,6 +49,7 @@ Three tiers, one box. A call flows: **SDK → orchestrator → worker → back**
 | Fault tolerance | At-least-once delivery, WAL replay across orchestrator crashes, heartbeat-based worker reaping, CAS state transitions | `orchestrator/job_store.go` |
 | Idempotency | Caller-supplied keys → effective exactly-once, result bytes persisted across restarts | `orchestrator/server.go` |
 | Autoscaling | demand-driven worker launch (queue depth / saturation), idle scale-down, min/max bounds | `orchestrator/autoscaler.go` |
+| Streaming | live `print()` relay worker → client, push-based result delivery (`WatchJob`), no polling | `orchestrator/watch.go`, `worker/logstream.py` |
 | Observability | `/metrics` JSON, dashboard with live p50/p95/p99 cold-start chart | `dashboard/`, `orchestrator/metrics.go` |
 | Tests | Go unit tests; Python unit tests for the SDK + every cold-start strategy; integration tests covering SIGKILL mid-execution + reaper recovery, restart with in-flight job, idempotency across restart | `orchestrator/*_test.go`, `tests/unit/`, `tests/` |
 
@@ -108,6 +109,27 @@ Knobs (env): `MINIMODAL_AUTOSCALE_MIN` / `_MAX` (0 / 4),
 `_IDLE_TIMEOUT` (30s), `_COOLDOWN` (3s), `_REGISTER_TIMEOUT` (15s),
 `_TICK` (500ms), plus `MINIMODAL_WORKER_CMD`, `MINIMODAL_WORKER_DIR`,
 `MINIMODAL_WORKER_BASE_PORT` for how workers get exec'd.
+
+## Live logs & streamed results
+
+A `print()` inside your function shows up on your terminal while the function
+is still running on the worker — and the result arrives as a push, not a poll:
+
+- **Worker → orchestrator**: the worker tees each task's stdout/stderr through
+  a thread-local router and ships complete lines over a client-streaming
+  `StreamTaskLogs` RPC (lazily — silent functions pay nothing).
+- **Orchestrator → client**: `Future.get()` consumes a server-streaming
+  `WatchJob` RPC carrying status transitions, log lines, and finally the
+  terminal result. The old GetJobStatus polling loop is gone.
+- Logs are live-only: bounded in-memory buffers while the job runs, replayed
+  to watchers that join mid-run, discarded once the job is terminal. Results
+  still persist in the WAL as before.
+- Executors that can't stream mid-run (naive subprocess) return captured
+  output with the final report; it reaches the watcher as tail lines just
+  before the result. Fork-child output currently lands in the worker's own
+  log only.
+
+Try it: `python examples/streaming_logs.py`.
 
 ## Why fork isn't actually enough
 

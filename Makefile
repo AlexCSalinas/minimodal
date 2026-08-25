@@ -95,6 +95,7 @@ lint-py:
 test-integration: orchestrator
 	$(PYTHON) tests/test_idempotency.py
 	$(PYTHON) tests/test_fault_tolerance.py
+	$(PYTHON) tests/test_streaming.py
 
 # Mirror what .github/workflows/ci.yml runs — useful for catching CI failures
 # before pushing.

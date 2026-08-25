@@ -1,9 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"log/slog"
 	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"strconv"
@@ -30,6 +33,53 @@ func configureLogger() {
 	slog.SetDefault(slog.New(handler))
 }
 
+// watchRaftLeadership re-runs WAL replay each time this node becomes leader:
+// jobs that were PENDING/RUNNING under the previous leader get requeued into
+// this node's dispatch loop. Followers dispatch nothing.
+func watchRaftLeadership(ctx context.Context, srv *Server, rs *RaftStore) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case isLeader := <-rs.LeaderCh():
+			if !isLeader {
+				slog.Info("raft: lost leadership")
+				continue
+			}
+			slog.Info("raft: became leader; replaying unfinished jobs")
+			if err := srv.RecoverUnfinishedJobs(); err != nil {
+				slog.Error("raft: leader replay failed", "err", err)
+			}
+		}
+	}
+}
+
+// joinRaftCluster asks an existing node to add us as a voter, retrying while
+// the target cluster elects a leader or the operator brings it up.
+func joinRaftCluster(cfg Config) {
+	body, _ := json.Marshal(map[string]string{"id": cfg.RaftID, "addr": cfg.RaftBind})
+	url := strings.TrimRight(cfg.RaftJoin, "/") + "/raft/join"
+	backoff := time.Second
+	for attempt := 1; attempt <= 30; attempt++ {
+		resp, err := http.Post(url, "application/json", bytes.NewReader(body))
+		if err == nil {
+			_ = resp.Body.Close()
+			if resp.StatusCode == http.StatusNoContent {
+				slog.Info("raft: joined cluster", "via", url)
+				return
+			}
+			slog.Warn("raft: join rejected; retrying", "status", resp.StatusCode, "attempt", attempt)
+		} else {
+			slog.Warn("raft: join request failed; retrying", "err", err, "attempt", attempt)
+		}
+		time.Sleep(backoff)
+		if backoff < 5*time.Second {
+			backoff *= 2
+		}
+	}
+	slog.Error("raft: gave up joining cluster", "via", url)
+}
+
 func main() {
 	configureLogger()
 	cfg := LoadConfig()
@@ -49,9 +99,14 @@ func main() {
 
 	// Phase 4: WAL replay. Must run before the gRPC server starts accepting
 	// new InvokeFunction calls, so recovered jobs queue up before fresh ones.
-	if err := srv.RecoverUnfinishedJobs(); err != nil {
-		slog.Error("WAL replay failed", "err", err)
-		os.Exit(1)
+	// In raft mode, replay instead runs on leadership acquisition (see
+	// watchRaftLeadership): a booting node is a follower with no business
+	// enqueueing anything.
+	if srv.RaftStore() == nil {
+		if err := srv.RecoverUnfinishedJobs(); err != nil {
+			slog.Error("WAL replay failed", "err", err)
+			os.Exit(1)
+		}
 	}
 
 	// MaxRecvMsgSize set generously above the application-level
@@ -69,6 +124,18 @@ func main() {
 
 	go srv.workerPool.RunFaultDetector(bgCtx)
 	go srv.RunPendingQueueLoop(bgCtx)
+
+	if rs := srv.RaftStore(); rs != nil {
+		go watchRaftLeadership(bgCtx, srv, rs)
+		if cfg.RaftJoin != "" {
+			go joinRaftCluster(cfg)
+		}
+		slog.Info("raft enabled",
+			"id", cfg.RaftID,
+			"bind", cfg.RaftBind,
+			"dir", cfg.RaftDir,
+			"join", cfg.RaftJoin)
+	}
 
 	// Autoscaler (opt-in): the orchestrator launches and reaps local worker
 	// processes on demand. Composes with externally started workers — they

@@ -61,6 +61,14 @@ type JobRecord struct {
 	UpdatedAt  time.Time `json:"updated_at"`
 	RetryCount int       `json:"retry_count"`
 	Error      string    `json:"error,omitempty"`
+
+	// Version increments on every write in Raft mode. RaftStore.Transition
+	// runs the caller's mutator on the leader's local copy, then replicates a
+	// compare-and-swap keyed on this version — the FSM rejects the write if
+	// another command got there first, and the leader re-reads and retries.
+	// Zero (and ignored) in plain BoltStore mode, where BoltDB transactions
+	// provide the atomicity instead.
+	Version int64 `json:"version,omitempty"`
 }
 
 // Store is the abstract interface every JobStore implementation satisfies.
@@ -259,6 +267,142 @@ func (s *BoltStore) SubmitWithIdempotency(rec JobRecord, idempotencyKey string) 
 		return nil
 	})
 	return
+}
+
+// =============================================================================
+// Raft FSM support — raw variants that write records verbatim.
+//
+// The public methods above stamp UpdatedAt with the local clock, which is
+// fine for a single node but non-deterministic across a Raft cluster: every
+// replica must end up with byte-identical state from the same command, so
+// timestamps are stamped ONCE by the leader at propose time and applied
+// verbatim here.
+// =============================================================================
+
+// putJobRaw writes a record exactly as given (no timestamp or version
+// stamping). FSM use only.
+func (s *BoltStore) putJobRaw(rec JobRecord) error {
+	buf, err := json.Marshal(rec)
+	if err != nil {
+		return err
+	}
+	return s.db.Update(func(tx *bolt.Tx) error {
+		return tx.Bucket([]byte(bucketJobs)).Put([]byte(rec.ID), buf)
+	})
+}
+
+// casPut writes a record iff the stored version still matches expected.
+// Returns conflict=true (and writes nothing) when another command won the
+// race. A missing job is an error — Transition callers verified existence.
+func (s *BoltStore) casPut(jobID string, expectedVersion int64, rec JobRecord) (conflict bool, err error) {
+	err = s.db.Update(func(tx *bolt.Tx) error {
+		bucket := tx.Bucket([]byte(bucketJobs))
+		raw := bucket.Get([]byte(jobID))
+		if raw == nil {
+			return fmt.Errorf("job %s not found", jobID)
+		}
+		var cur JobRecord
+		if err := json.Unmarshal(raw, &cur); err != nil {
+			return err
+		}
+		if cur.Version != expectedVersion {
+			conflict = true
+			return nil
+		}
+		buf, err := json.Marshal(rec)
+		if err != nil {
+			return err
+		}
+		return bucket.Put([]byte(jobID), buf)
+	})
+	return conflict, err
+}
+
+// submitRaw is SubmitWithIdempotency without timestamp stamping — the record
+// arrives fully stamped by the leader. FSM use only.
+func (s *BoltStore) submitRaw(rec JobRecord, idempotencyKey string) (jobID string, created bool, err error) {
+	err = s.db.Update(func(tx *bolt.Tx) error {
+		jobs := tx.Bucket([]byte(bucketJobs))
+		idx := tx.Bucket([]byte(bucketIdempotency))
+		if idempotencyKey != "" {
+			if existing := idx.Get([]byte(idempotencyKey)); existing != nil {
+				jobID = string(existing)
+				created = false
+				return nil
+			}
+		}
+		buf, err := json.Marshal(rec)
+		if err != nil {
+			return err
+		}
+		if err := jobs.Put([]byte(rec.ID), buf); err != nil {
+			return err
+		}
+		if idempotencyKey != "" {
+			if err := idx.Put([]byte(idempotencyKey), []byte(rec.ID)); err != nil {
+				return err
+			}
+		}
+		jobID = rec.ID
+		created = true
+		return nil
+	})
+	return
+}
+
+// exportState dumps everything a Raft snapshot needs to reconstruct this
+// store: all job records plus the idempotency index.
+func (s *BoltStore) exportState() (jobs []JobRecord, idem map[string]string, err error) {
+	idem = make(map[string]string)
+	err = s.db.View(func(tx *bolt.Tx) error {
+		if err := tx.Bucket([]byte(bucketJobs)).ForEach(func(k, v []byte) error {
+			var rec JobRecord
+			if err := json.Unmarshal(v, &rec); err != nil {
+				return err
+			}
+			jobs = append(jobs, rec)
+			return nil
+		}); err != nil {
+			return err
+		}
+		return tx.Bucket([]byte(bucketIdempotency)).ForEach(func(k, v []byte) error {
+			idem[string(k)] = string(v)
+			return nil
+		})
+	})
+	return jobs, idem, err
+}
+
+// importState replaces this store's contents with a snapshot's. Used by the
+// Raft FSM's Restore when a node catches up from a snapshot.
+func (s *BoltStore) importState(jobs []JobRecord, idem map[string]string) error {
+	return s.db.Update(func(tx *bolt.Tx) error {
+		for _, name := range []string{bucketJobs, bucketIdempotency} {
+			if err := tx.DeleteBucket([]byte(name)); err != nil {
+				return err
+			}
+			if _, err := tx.CreateBucket([]byte(name)); err != nil {
+				return err
+			}
+		}
+		jobsBucket := tx.Bucket([]byte(bucketJobs))
+		for _, rec := range jobs {
+			buf, err := json.Marshal(rec)
+			if err != nil {
+				return err
+			}
+			if err := jobsBucket.Put([]byte(rec.ID), buf); err != nil {
+				return err
+			}
+		}
+		idxBucket := tx.Bucket([]byte(bucketIdempotency))
+		for k, v := range idem {
+			if err := idxBucket.Put([]byte(k), []byte(v)); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }
 
 // ListRunningOnWorker returns all jobs currently RUNNING on a given worker.

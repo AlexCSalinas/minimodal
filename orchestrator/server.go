@@ -67,10 +67,22 @@ const (
 )
 
 func NewServer(cfg Config) (*Server, error) {
-	store, err := NewBoltStore(cfg.DBPath)
+	var store Store
+	var err error
+	if cfg.RaftEnabled {
+		store, err = NewRaftStore(cfg)
+	} else {
+		store, err = NewBoltStore(cfg.DBPath)
+	}
 	if err != nil {
 		return nil, err
 	}
+	return NewServerWithStore(cfg, store)
+}
+
+// NewServerWithStore builds a Server around an already-constructed Store —
+// the seam tests use to run the full server over a RaftStore.
+func NewServerWithStore(cfg Config, store Store) (*Server, error) {
 	pool := NewWorkerPool(cfg.WorkerTimeout)
 	sched := NewScheduler(pool, store)
 	sched.SetRPCTimeout(cfg.ExecuteTaskTimeout)
@@ -375,7 +387,7 @@ func (s *Server) ReportTaskResult(ctx context.Context, req *pb.ReportTaskResultR
 		return nil
 	})
 	if err != nil {
-		return nil, status.Errorf(codes.Internal, "transition job: %v", err)
+		return nil, storeErrToStatus(err, "transition job")
 	}
 	s.notifyTerminal(req.JobId)
 
@@ -420,7 +432,7 @@ func (s *Server) InvokeFunction(ctx context.Context, req *pb.InvokeFunctionReque
 	}
 	jobID, created, err := s.jobStore.SubmitWithIdempotency(rec, req.IdempotencyKey)
 	if err != nil {
-		return nil, status.Errorf(codes.Internal, "persist job: %v", err)
+		return nil, storeErrToStatus(err, "persist job")
 	}
 
 	if created {
@@ -514,6 +526,23 @@ func (s *Server) GetJobStatus(ctx context.Context, req *pb.GetJobStatusRequest) 
 		}
 	}
 	return resp, nil
+}
+
+// storeErrToStatus maps store errors to gRPC statuses. A write on a raft
+// follower gets FailedPrecondition with the leader's address in the message,
+// so the client knows where to reconnect rather than seeing an opaque 500.
+func storeErrToStatus(err error, context string) error {
+	if errors.Is(err, ErrNotLeader) {
+		return status.Errorf(codes.FailedPrecondition, "%s: %v", context, err)
+	}
+	return status.Errorf(codes.Internal, "%s: %v", context, err)
+}
+
+// RaftStore returns the underlying RaftStore in raft mode, nil otherwise.
+// Used by the HTTP join/status endpoints and main's leadership watcher.
+func (s *Server) RaftStore() *RaftStore {
+	rs, _ := s.jobStore.(*RaftStore)
+	return rs
 }
 
 func mapStatus(s JobStatus) pb.JobStatus {

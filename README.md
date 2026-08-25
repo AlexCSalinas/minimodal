@@ -50,6 +50,7 @@ Three tiers, one box. A call flows: **SDK → orchestrator → worker → back**
 | Idempotency | Caller-supplied keys → effective exactly-once, result bytes persisted across restarts | `orchestrator/server.go` |
 | Autoscaling | demand-driven worker launch (queue depth / saturation), idle scale-down, min/max bounds | `orchestrator/autoscaler.go` |
 | Streaming | live `print()` relay worker → client, push-based result delivery (`WatchJob`), no polling | `orchestrator/watch.go`, `worker/logstream.py` |
+| Consensus | Raft-replicated job store: majority commits, leader failover with zero job loss, versioned CAS transitions | `orchestrator/raft_store.go`, `orchestrator/raft_fsm.go` |
 | Observability | `/metrics` JSON, dashboard with live p50/p95/p99 cold-start chart | `dashboard/`, `orchestrator/metrics.go` |
 | Tests | Go unit tests; Python unit tests for the SDK + every cold-start strategy; integration tests covering SIGKILL mid-execution + reaper recovery, restart with in-flight job, idempotency across restart | `orchestrator/*_test.go`, `tests/unit/`, `tests/` |
 
@@ -131,6 +132,43 @@ is still running on the worker — and the result arrives as a push, not a poll:
 
 Try it: `python examples/streaming_logs.py`.
 
+## Distributed orchestrator (Raft)
+
+Set `MINIMODAL_RAFT=1` and the job store becomes a replicated state machine:
+every write commits on a majority of orchestrator nodes before it counts, so
+job state — pending payloads, results, the idempotency index — survives the
+loss of any minority, **including the leader**.
+
+```bash
+# Node A bootstraps a new cluster; B and C join through A's HTTP endpoint.
+MINIMODAL_RAFT=1 MINIMODAL_RAFT_ID=node-a MINIMODAL_RAFT_BIND=10.0.0.1:7000 \
+  MINIMODAL_RAFT_DIR=/var/minimodal/raft ./orchestrator
+MINIMODAL_RAFT=1 MINIMODAL_RAFT_ID=node-b MINIMODAL_RAFT_BIND=10.0.0.2:7000 \
+  MINIMODAL_RAFT_JOIN=http://10.0.0.1:8080 ./orchestrator
+# GET /raft/status on any node shows state, leader, and membership.
+```
+
+Design notes:
+
+- **Closures over consensus.** `Store.Transition` takes an arbitrary mutator
+  function, which can't ride a Raft log. The leader runs the mutator against
+  its local copy and replicates a compare-and-swap keyed on a per-record
+  version; if another command won the race, the CAS conflicts at apply time
+  and the leader re-reads and re-runs the mutator. The Store interface — and
+  every caller in the scheduler/reaper/RPC layer — is unchanged.
+- **Deterministic FSM.** Timestamps are stamped once by the leader at propose
+  time; every node applies commands verbatim to its own embedded BoltStore,
+  so replicas converge byte-for-byte. Snapshots serialize the full job table
+  + idempotency index; a node joining late catches up from snapshot + log.
+- **Leader-only writes.** A write on a follower returns `FailedPrecondition`
+  with the leader's address in the message. Dispatch, recovery, and the
+  reaper run on the leader; on failover the new leader replays unfinished
+  jobs from the replicated WAL.
+- **Scope.** v1 replicates the store and elects who schedules. Pointing SDK
+  clients and workers at the new leader after failover is the deployment's
+  job (VIP / DNS / proxy) — connection-level failover in the SDK is future
+  work.
+
 ## Why fork isn't actually enough
 
 Copy-on-write fork is fast but breaks on three real-world things:
@@ -151,5 +189,3 @@ The real Modal trick is **CRIU + `userfaultfd`**: snapshot a warm process to dis
 
 - Real CRIU integration on Linux — target <50 ms cold start on torch + a 200 MB model
 - Multi-tenant isolation (cgroups + seccomp filters per function)
-- Distributed orchestrator (Raft consensus on the job store)
-- Streaming results over gRPC
